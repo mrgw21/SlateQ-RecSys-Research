@@ -1,0 +1,11 @@
+recsim-ng
+tensorflow==2.15.0
+tensorflow-probability
+edward2
+tf-agents
+gin-config
+numpy
+pandas
+scipy
+matplotlib
+optuna
