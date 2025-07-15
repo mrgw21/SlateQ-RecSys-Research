@@ -1,0 +1,4 @@
+import src.stories.ecomm_story
+ecomm_story.num_users = 10
+ecomm_story.num_items = 100
+ecomm_story.slate_size = 5
