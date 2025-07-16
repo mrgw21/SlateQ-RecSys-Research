@@ -12,16 +12,15 @@ class ECommUser(static.StaticStateModel):
         self.num_users = num_users
 
     def specs(self):
-        return value.ValueSpec(fields={'interest': value.ValueSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32)})
+        return value.ValueSpec(interest=value.FieldSpec())
 
     def initial_state(self):
-        state_dict = {'interest': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_users, self.num_topics))}
-        return value.Value(**state_dict)
+        return value.Value(interest=tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_users, self.num_topics)))
 
     def response(self, user_state, slate, item_state):
         affinities = tf.matmul(user_state['interest'], item_state['features'][slate.value], transpose_b=True)
         choice = tfd.Categorical(logits=affinities).sample()
-        return {'choice': choice, 'reward': affinities[choice]}
+        return value.Value(choice=choice, reward=affinities[choice])
 
     def next_state(self, previous_state, response):
-        return {'interest': previous_state['interest'] + 0.1 * response.value['reward']}
+        return value.Value(interest=previous_state['interest'] + 0.1 * response['reward'])

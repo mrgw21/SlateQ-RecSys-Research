@@ -14,8 +14,16 @@ def main(argv):
     network = TFNetwork(variables=story)
     rt = ECommRuntime(network=network)
     trajectory = rt.trajectory(num_steps=1000)
-    for step in trajectory:
-        print(step.get('user_state'))
+    user_state = trajectory.get('user_state')
+    if user_state:
+        interest = user_state.get('interest')
+        if isinstance(interest, tf.Tensor):
+            for value in interest.numpy():
+                print(value)
+        else:
+            print(interest)
+    else:
+        print("No user_state in trajectory")
 
 if __name__ == '__main__':
     app.run(main)

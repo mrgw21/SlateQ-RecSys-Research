@@ -11,16 +11,16 @@ class ECommRecommender(static.StaticStateModel):
         self.num_topics = num_topics
 
     def specs(self):
-        return value.ValueSpec(fields={'rec_features': value.ValueSpec(shape=(self.num_topics,), dtype=tf.float32)})
+        return value.ValueSpec(rec_features=value.FieldSpec())
 
     def initial_state(self):
-        state_dict = {'rec_features': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,))}
-        return value.Value(**state_dict)
+        return value.Value(rec_features=tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,)))
 
     def select_slate(self, rec_state, user_state, slate_size):
-        affinities = tf.matmul(user_state['interest'], rec_state['rec_features'], transpose_b=True)
+        rec_features = tf.expand_dims(rec_state.get('rec_features'), axis=1)
+        affinities = tf.matmul(user_state.get('interest'), rec_features)
         slate = tf.argsort(affinities, direction='DESCENDING')[:, :slate_size]
-        return slate
+        return value.Value(slate=slate)
 
     def next_state(self, previous_state, response):
-        return previous_state
+        return value.Value(rec_features=previous_state.get('rec_features'))
