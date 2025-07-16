@@ -12,7 +12,7 @@ class ECommUser(static.StaticStateModel):
         self.num_users = num_users
 
     def specs(self):
-        return value.ValueSpec(fields={'interest': value.ValueSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32)})
+        return {'interest': value.ValueSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32)}
 
     def initial_state(self):
         state_dict = {'interest': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_users, self.num_topics))}

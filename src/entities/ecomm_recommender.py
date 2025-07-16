@@ -11,7 +11,7 @@ class ECommRecommender(static.StaticStateModel):
         self.num_topics = num_topics
 
     def specs(self):
-        return value.ValueSpec(fields={'rec_features': value.ValueSpec(shape=(self.num_topics,), dtype=tf.float32)})
+        return {'rec_features': value.ValueSpec(shape=(self.num_topics,), dtype=tf.float32)}
 
     def initial_state(self):
         state_dict = {'rec_features': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,))}
