@@ -6,7 +6,7 @@ class ECommItem(static.StaticStateModel):
         self.num_topics = num_topics
 
     def specs(self):
-        return {'features': tfd.Normal(loc=0., scale=1.).sample(shape=(self.num_topics,))}
+        return {'features': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,))}
 
     def initial_state(self):
-        return {'features': tfd.Normal(loc=0., scale=1.).sample(shape=(self.num_topics,))}
+        return {'features': tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,))}
