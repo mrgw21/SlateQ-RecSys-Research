@@ -14,15 +14,15 @@ def main(argv):
     story = ecomm_story(num_users=10, num_items=100, slate_size=5)
     network = TFNetwork(variables=story)
     rt = ECommRuntime(network=network)
-    trajectory = rt.trajectory(num_steps=1000)
+    trajectory = rt.trajectory(num_steps=5000)  # Increased to 5000 to test convergence
     user_state = trajectory.get('user_state')
     if user_state:
         interest = user_state.get('interest')
         if isinstance(interest, tf.Tensor):
-            for value in interest.numpy():
-                print(value)
+            for i, value in enumerate(interest.numpy()):
+                print(f"User {i} final interest: {value}")
         else:
-            print(interest)
+            print(f"Interest: {interest}")
     else:
         print("No user_state in trajectory")
 
