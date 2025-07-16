@@ -36,4 +36,15 @@ def ecomm_story(num_users, num_items, slate_size):
     item_state.value = variable.value(item_model.next_state, (item_state.previous, response))
     rec_state.value = variable.value(recommender_model.next_state, (rec_state.previous, response))
 
+    # Debug: Print initial shapes
+    initial_user_state = user_model.initial_state()
+    initial_item_state = item_model.initial_state()
+    initial_rec_state = recommender_model.initial_state()
+    print(f"Initial user_state interest shape: {initial_user_state.get('interest').shape}")
+    print(f"Initial item_state features shape: {initial_item_state.get('features').shape}")
+    print(f"Initial rec_state rec_features shape: {initial_rec_state.get('rec_features').shape}")
+    print(f"Initial slate shape: {(slate_size,)}")
+    print(f"Initial response choice shape: ()")
+    print(f"Initial response reward shape: ()")
+
     return [user_state, item_state, rec_state, slate, response]

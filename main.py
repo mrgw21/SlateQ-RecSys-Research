@@ -1,4 +1,5 @@
 import gin
+import tensorflow as tf
 from absl import app, flags
 from src.stories.ecomm_story import ecomm_story
 from src.runtimes.ecomm_runtime import ECommRuntime

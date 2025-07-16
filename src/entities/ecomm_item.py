@@ -17,4 +17,4 @@ class ECommItem(static.StaticStateModel):
         return value.Value(features=tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,)))
 
     def next_state(self, previous_state, response):
-        return value.Value(features=previous_state['features'])
+        return value.Value(features=previous_state.get('features'))
