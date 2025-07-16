@@ -14,7 +14,8 @@ def main(argv):
     network = TFNetwork(variables=story)
     rt = ECommRuntime(network=network)
     trajectory = rt.trajectory(num_steps=1000)
-    print(trajectory)
+    for step in trajectory:
+        print(step.get('user_state'))
 
 if __name__ == '__main__':
     app.run(main)
