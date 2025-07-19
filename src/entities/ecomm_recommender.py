@@ -1,32 +1,32 @@
 import gin
-from recsim_ng.entities.state_models import static
-from tensorflow_probability import distributions as tfd
+from recsim_ng.core import ActionModel  # Try core-level import
 import tensorflow as tf
 from recsim_ng.core import value
 
 @gin.configurable
-class ECommRecommender(static.StaticStateModel):
-    def __init__(self, num_topics=10):
+class ECommRecommender(ActionModel):  # Use ActionModel as base
+    def __init__(self, num_topics=10, num_users=10, slate_size=5):
         super().__init__()
         self.num_topics = num_topics
+        self.num_users = num_users
+        self.slate_size = slate_size
 
     def specs(self):
-        return value.ValueSpec(rec_features=value.FieldSpec())
+        return value.ValueSpec(
+            rec_features=value.FieldSpec(),
+            slate=value.FieldSpec()
+        )
 
     def initial_state(self):
-        return value.Value(rec_features=tfd.Normal(loc=0., scale=1.).sample(sample_shape=(self.num_topics,)))
+        rec_features = tf.random.uniform((self.num_users, self.num_topics), minval=-1.0, maxval=1.0)
+        return value.Value(rec_features=rec_features)
 
-    def select_slate(self, rec_state, user_state, slate_size):
-        # Ensure diverse slate by using user interest to rank items
-        rec_features = rec_state.get('rec_features')  # Shape: (10,)
-        user_interest = user_state.get('interest')    # Shape: (10, 10)
-        # Compute affinities with proper broadcasting
-        affinities = tf.tensordot(user_interest, rec_features, axes=1)  # Shape: (10,) per user
-        # Sort and select top slate_size indices for each user
-        top_indices = tf.argsort(affinities, direction='DESCENDING')[:slate_size]  # Shape: (slate_size,)
-        # Create a (10, slate_size) slate by repeating for all users using tf.repeat
-        top_indices_tiled = tf.repeat(tf.expand_dims(top_indices, axis=0), tf.shape(user_interest)[0], axis=0)  # Shape: (10, slate_size)
-        return value.Value(slate=top_indices_tiled)
+    def next_state(self, previous_state, action):
+        return previous_state  # Static for now
 
-    def next_state(self, previous_state, response):
-        return value.Value(rec_features=previous_state.get('rec_features'))
+    def action(self, state, previous_action):
+        # Expect slate from agent, raise error if missing
+        slate = state.get('agent_slate')
+        if slate is None or slate.shape != (self.num_users, self.slate_size):
+            raise ValueError(f"Expected agent_slate with shape ({self.num_users}, {self.slate_size}), got {slate}")
+        return value.Value(slate=slate)
