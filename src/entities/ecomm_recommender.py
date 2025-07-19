@@ -1,10 +1,10 @@
 import gin
-from recsim_ng.core import ActionModel  # Try core-level import
+from recsim_ng.entities.state_models.static import StaticStateModel
 import tensorflow as tf
 from recsim_ng.core import value
 
 @gin.configurable
-class ECommRecommender(ActionModel):  # Use ActionModel as base
+class ECommRecommender(StaticStateModel):
     def __init__(self, num_topics=10, num_users=10, slate_size=5):
         super().__init__()
         self.num_topics = num_topics

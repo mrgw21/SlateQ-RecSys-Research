@@ -1,31 +1,33 @@
+import gin
 from recsim_ng.core import network
-from recsim_ng.entities.state_models import DynamicStateModel  # Use specific class
-from recsim_ng.core import ActionModel  # Updated import
 import tensorflow as tf
 from ..entities.ecomm_user import ECommUser
 from ..entities.ecomm_recommender import ECommRecommender
+from recsim_ng.entities.state_models.static import StaticStateModel
+from recsim_ng.core import value
 
+class ItemStateModel(StaticStateModel):
+    def __init__(self, num_items, num_topics):
+        super().__init__()
+        self.num_items = num_items
+        self.num_topics = num_topics
+
+    def initial_state(self):
+        return value.Value(state=tf.random.uniform((self.num_items, self.num_topics), minval=-1.0, maxval=1.0))
+
+    def specs(self):
+        return value.ValueSpec(state=value.FieldSpec(shape=(self.num_items, self.num_topics), dtype=tf.float32))
+
+@gin.configurable
 def ecomm_story(num_users=10, num_items=100, slate_size=5):
     # Define user state model
-    user = DynamicStateModel.create(
-        ECommUser,
-        num_topics=10,
-        num_users=num_users
-    )
+    user = ECommUser(num_topics=10, num_users=num_users)
 
-    # Define recommender action model
-    recommender = ActionModel.create(
-        ECommRecommender,
-        num_topics=10,
-        num_users=num_users,
-        slate_size=slate_size
-    )
+    # Define recommender state model
+    recommender = ECommRecommender(num_topics=10, num_users=num_users, slate_size=slate_size)
 
     # Define item state model
-    item_state = DynamicStateModel.create(
-        lambda: tf.random.uniform((num_items, 10), minval=-1.0, maxval=1.0),
-        name="item_state"
-    )
+    item_state = ItemStateModel(num_items=num_items, num_topics=10)
 
     # Compose the network
     return network.Network(

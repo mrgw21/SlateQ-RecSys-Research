@@ -13,11 +13,6 @@ class ECommRuntime(runtime.TFRuntime):
             for step in range(num_steps):
                 action_step = policy.action(time_step)
                 next_time_step = self.step(action_step.action)
-                experience = tf_agents.trajectories.trajectory.from_transition(time_step, action_step, next_time_step)
-                # Train the agent
-                if hasattr(policy._agent, '_train'):
-                    loss_info = policy._agent.train(experience)
-                    print(f"Episode {episode}, Step {step}, Loss: {loss_info.loss.numpy()}")
                 episode_reward += next_time_step.reward.numpy().sum()
                 time_step = next_time_step
             print(f"Episode {episode} completed, Total Reward: {episode_reward}")
@@ -39,9 +34,9 @@ class ECommRuntime(runtime.TFRuntime):
             tf.TensorShape([10, 10]) if i == 1 else  # user_state.interest
             tf.TensorShape([10]) if i in [2, 3] else  # item_state.features, rec_state.rec_features
             tf.TensorShape([5]) if i == 4 else  # slate
-            tf.TensorShape([10, 10]) if i == 5 and num_elements > 5 else tf.TensorShape(None)  # response.choice (per-topic)
+            tf.TensorShape([]) if i == 5 and num_elements > 5 else tf.TensorShape(None)  # response.choice (optional)
             for i in range(max(6, num_elements))
-        ) + (tf.TensorShape([10, 10, 1]) if num_elements > 6 else tf.TensorShape(None),)  # response.reward (per-topic)
+        ) + (tf.TensorShape([1]) if num_elements > 6 else tf.TensorShape(None),)  # response.reward (optional)
         print(f"Number of elements in packed initial state: {num_elements}, shape_invariants: {shape_invariants}")
 
         # Use tf.while_loop with shape_invariants
@@ -54,11 +49,13 @@ class ECommRuntime(runtime.TFRuntime):
                 interest_idx = 1
                 response_idx = 5 if num_elements > 5 else None
                 if interest_idx < len(next_state):
-                    interest_val = next_state[interest_idx] if isinstance(next_state[interest_idx], (tf.Tensor, np.ndarray)) else next_state[interest_idx].get('interest')
+                    interest_val = next_state[interest_idx] if isinstance(next_state[interest_idx], (tf.Tensor, np.ndarray)) else next_state[interest_idx].get('interest', next_state[interest_idx])
                     reward_val = "N/A"
                     if response_idx is not None and response_idx + 1 < len(next_state):
-                        reward_val = next_state[response_idx + 1] if isinstance(next_state[response_idx + 1], (tf.Tensor, np.ndarray)) else "N/A"
+                        reward_val = next_state[response_idx + 1] if isinstance(next_time_step[response_idx + 1], (tf.Tensor, np.ndarray)) else "N/A"
                     print(f"Step {step}: interest: {interest_val}, reward: {reward_val}")
+                else:
+                    print(f"Step {step}: interest: N/A, reward: N/A")
             return [step + 1, next_state]
 
         _, trajectory = tf.while_loop(
