@@ -1,7 +1,18 @@
 import gin
-from recsim_ng.entities.state_models.static import StaticStateModel
 import tensorflow as tf
+from recsim_ng.entities.state_models.static import StaticStateModel
 from recsim_ng.core import value
+
+
+class TensorFieldSpec(value.FieldSpec):
+    def __init__(self, shape, dtype):
+        super().__init__()
+        self.shape = shape
+        self.dtype = dtype
+
+    def invariant(self):
+        return tf.TensorSpec(shape=self.shape, dtype=self.dtype)
+
 
 @gin.configurable
 class ECommRecommender(StaticStateModel):
@@ -13,20 +24,31 @@ class ECommRecommender(StaticStateModel):
 
     def specs(self):
         return value.ValueSpec(
-            rec_features=value.FieldSpec(),
-            slate=value.FieldSpec()
+            rec_features=TensorFieldSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32),
+            slate=TensorFieldSpec(shape=(self.num_users, self.slate_size), dtype=tf.int32)
         )
 
     def initial_state(self):
-        rec_features = tf.random.uniform((self.num_users, self.num_topics), minval=-1.0, maxval=1.0)
-        return value.Value(rec_features=rec_features)
+        rec_features = tf.random.uniform(
+            shape=(self.num_users, self.num_topics),
+            minval=-1.0,
+            maxval=1.0,
+            dtype=tf.float32
+        )
+        slate = tf.zeros((self.num_users, self.slate_size), dtype=tf.int32)
+        
+        return value.Value(rec_features=rec_features, slate=slate)
 
     def next_state(self, previous_state, action):
-        return previous_state  # Static for now
+        return previous_state
 
     def action(self, state, previous_action):
-        # Expect slate from agent, raise error if missing
         slate = state.get('agent_slate')
-        if slate is None or slate.shape != (self.num_users, self.slate_size):
-            raise ValueError(f"Expected agent_slate with shape ({self.num_users}, {self.slate_size}), got {slate}")
+        if slate is None:
+            raise ValueError("Missing 'agent_slate' in state.")
+        if slate.shape != (self.num_users, self.slate_size):
+            raise ValueError(f"Expected agent_slate shape {(self.num_users, self.slate_size)}, got {slate.shape}")
         return value.Value(slate=slate)
+
+    def action_spec(self):
+        return tf.TensorSpec(shape=(self.num_users, self.slate_size), dtype=tf.int32, name="slate")
