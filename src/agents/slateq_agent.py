@@ -40,7 +40,33 @@ class SlateQPolicy(tf_policy.TFPolicy):
         dist = self._distribution(time_step, policy_state)
         action = dist.sample(seed=seed)
         return policy_step.PolicyStep(action=action, state=policy_state)
+    
+class SlateQExplorationPolicy(tf_policy.TFPolicy):
+    def __init__(self, base_policy, num_items, slate_size, epsilon=0.1):
+        super().__init__(base_policy.time_step_spec, base_policy.action_spec)
+        self._base_policy = base_policy
+        self._num_items = num_items
+        self._slate_size = slate_size
+        self._epsilon = epsilon
 
+    def _action(self, time_step, policy_state=(), seed=None):
+        batch_size = tf.shape(time_step.observation['interest'])[0]
+
+        def random_slate():
+            return tf.random.uniform(
+                shape=(batch_size, self._slate_size),
+                minval=0,
+                maxval=self._num_items,
+                dtype=tf.int32
+            )
+
+        def greedy_slate():
+            return self._base_policy.action(time_step).action
+
+        should_explore = tf.less(tf.random.uniform([batch_size]), self._epsilon)
+        action = tf.where(should_explore[:, tf.newaxis], random_slate(), greedy_slate())
+
+        return policy_step.PolicyStep(action=action, state=policy_state)
 
 class SlateQAgent(tf_agent.TFAgent):
     def __init__(self, time_step_spec, action_spec,
@@ -60,7 +86,7 @@ class SlateQAgent(tf_agent.TFAgent):
 
         self._optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-        self._policy = SlateQPolicy(
+        base_policy = SlateQPolicy(
             time_step_spec=time_step_spec,
             action_spec=action_spec,
             q_network=self._q_network,
@@ -68,14 +94,23 @@ class SlateQAgent(tf_agent.TFAgent):
             num_users=num_users
         )
 
+        self._policy = base_policy
+        self._collect_policy = SlateQExplorationPolicy(
+            base_policy=base_policy,
+            num_items=num_items,
+            slate_size=slate_size,
+            epsilon=0.1
+        )
+
         super().__init__(
             time_step_spec=time_step_spec,
             action_spec=action_spec,
             policy=self._policy,
-            collect_policy=self._policy,
+            collect_policy=self._collect_policy,
             train_sequence_length=2,
             train_step_counter=self._train_step_counter
         )
+
 
     @property
     def collect_data_spec(self):
@@ -93,33 +128,35 @@ class SlateQAgent(tf_agent.TFAgent):
         return tf.group(self._q_network.variables)
 
     def _train(self, experience, weights=None):
-        # Slice timestep=1 (latest)
-        observations = tf.nest.map_structure(lambda x: x[:, -1], experience.observation)
-        rewards = experience.reward[:, -1]         # [batch, users]
-        actions = experience.action[:, -1]         # [batch, users, slate]
-        step_type = experience.step_type[:, -1]
+        obs_tm1 = tf.nest.map_structure(lambda x: x[:, 0], experience.observation)
+        obs_tp1 = tf.nest.map_structure(lambda x: x[:, 1], experience.observation)
+        rewards = experience.reward[:, 1]
+        actions = experience.action[:, 1]
 
         with tf.GradientTape() as tape:
-            # Q-values: [batch, users, items]
-            q_values, _ = self._q_network(observations, step_type)
+            q_tm1, _ = self._q_network(obs_tm1, experience.step_type[:, 0])
 
-            # Broadcast to [batch, users, slate, items]
-            q_values_tiled = tf.tile(tf.expand_dims(q_values, axis=2), [1, 1, self._slate_size, 1])
+            # Gather Q(s_t, a_t)
+            q_tm1_tiled = tf.tile(tf.expand_dims(q_tm1, axis=2), [1, 1, self._slate_size, 1])
+            a_one_hot = tf.one_hot(actions, depth=self._num_items)
+            selected_q_tm1 = tf.reduce_sum(q_tm1_tiled * tf.cast(a_one_hot, tf.float32), axis=-1)
+            q_sa = tf.reduce_mean(selected_q_tm1, axis=-1)  # shape: [batch, users]
 
-            # One-hot encode actions: [batch, users, slate, items]
-            actions_one_hot = tf.one_hot(actions, depth=self._num_items)
+            # Next state Q(s', ·)
+            q_tp1, _ = self._q_network(obs_tp1, experience.step_type[:, 1])
+            top_k_next = tf.math.top_k(q_tp1, k=self._slate_size).indices  # [batch, users, slate]
+            top_k_one_hot = tf.one_hot(top_k_next, depth=self._num_items)
+            q_top_k = tf.reduce_sum(
+                tf.expand_dims(q_tp1, 2) * tf.cast(top_k_one_hot, tf.float32), axis=-1
+            )  # [batch, users, slate]
+            q_next_mean = tf.reduce_mean(q_top_k, axis=-1)  # [batch, users]
 
-            # Select Q-values for taken actions: [batch, users, slate]
-            selected_q_values = tf.reduce_sum(q_values_tiled * tf.cast(actions_one_hot, tf.float32), axis=-1)
+            target = rewards + 0.99 * q_next_mean
+            loss = tf.reduce_mean(tf.square(target - q_sa))
 
-            # Mean Q over slate: [batch, users]
-            selected_q_values_mean = tf.reduce_mean(selected_q_values, axis=-1)
-
-            # Loss: MSE between predicted Q and reward
-            loss = tf.reduce_mean(tf.square(rewards - selected_q_values_mean))
-
-        gradients = tape.gradient(loss, self._q_network.trainable_variables)
-        self._optimizer.apply_gradients(zip(gradients, self._q_network.trainable_variables))
+        grads = tape.gradient(loss, self._q_network.trainable_variables)
+        self._optimizer.apply_gradients(zip(grads, self._q_network.trainable_variables))
         self._train_step_counter.assign_add(1)
 
         return tf_agent.LossInfo(loss=loss, extra={})
+

@@ -56,11 +56,29 @@ class ECommUser(static.StaticStateModel):
 
         return value.Value(choice=choice, reward=reward)
 
-    def next_state(self, previous_state, response):
-        reward = tf.clip_by_value(response.get('resp'), -1.0, 1.0)
-        reward = tf.reshape(reward, [self.num_users, 1])
-        decay_factor = 0.99
-        interest = previous_state.get('interest')
-        updated_interest = decay_factor * interest + 0.1 * reward
-        updated_interest = tf.clip_by_value(updated_interest, -10.0, 10.0)
-        return value.Value(interest=updated_interest)
+    def response(self, user_state, slate, item_state):
+        slate_indices = slate.get('slate')  # shape: [num_users, slate_size]
+        features = item_state.get('features')
+
+        # Gather features for the selected items in the slate
+        gathered_features = tf.gather(features, slate_indices)  # [num_users, slate_size, num_topics]
+
+        interest = user_state.get('interest')  # [num_users, num_topics]
+        interest_expanded = tf.expand_dims(interest, axis=1)  # [num_users, 1, num_topics]
+
+        affinities = tf.reduce_sum(interest_expanded * gathered_features, axis=-1)  # [num_users, slate_size]
+
+        # Sample one item from slate
+        choice = tf.map_fn(
+            lambda x: tf.cast(tf.random.categorical(tf.expand_dims(x, 0), 1)[0, 0], tf.int32),
+            affinities,
+            fn_output_signature=tf.int32
+        )
+
+        # Reward = affinity of chosen item
+        reward = tf.gather(affinities, choice[:, tf.newaxis], batch_dims=1)
+        reward = tf.squeeze(reward, axis=1)
+
+        return value.Value(choice=choice, reward=reward)
+
+

@@ -39,7 +39,7 @@ class ECommRuntime(runtime.TFRuntime):
 
     def _to_transition(self, value):
         interest = value.get("user_state").get("interest")
-        reward = value.get("response").get("resp")
+        reward = value.get("response").get("reward")
         return ts.transition(
             observation={"interest": interest},
             reward=reward,

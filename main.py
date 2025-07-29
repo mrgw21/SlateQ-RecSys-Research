@@ -65,7 +65,7 @@ def main(argv):
         episode_reward = 0.0
 
         for step in range(100):
-            action_step = agent.policy.action(time_step)
+            action_step = agent.collect_policy.action(time_step)
 
             action = action_step.action
 
@@ -74,13 +74,12 @@ def main(argv):
             experience = trajectory_lib.from_transition(time_step, action_step, next_time_step)
             experience = tf.nest.map_structure(lambda x: tf.expand_dims(x, 0), experience)
             replay_buffer.add_batch(experience)
-            episode_reward += next_time_step.reward.numpy().sum()
+            episode_reward += next_time_step.reward.sum()
             time_step = next_time_step
 
             # Train on a batch from the replay buffer
             if replay_buffer.num_frames().numpy() > 32:
-                for batch in dataset.take(1):
-                    experience = batch[0]
+                for experience, _ in dataset.take(1):
                     loss_info = agent.train(experience)
 
             if step % 1000 == 0 and loss_info is not None:
