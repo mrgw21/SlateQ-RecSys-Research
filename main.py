@@ -61,7 +61,7 @@ def main(argv):
 
     num_users = 10
     slate_size = 5
-    num_episodes = 50
+    num_episodes = 100
 
     network = ecomm_story(num_users=num_users, num_items=100, slate_size=slate_size)
     rt = ECommRuntime(network=network)
@@ -112,7 +112,7 @@ def main(argv):
         last_choice = None
         last_reward = None
 
-        for step in range(100):
+        for step in range(500):
             clean_time_step = time_step._replace(
                 observation={"interest": time_step.observation["interest"]}
             )
@@ -192,61 +192,62 @@ def main(argv):
     plots_dir = Path("plots")
     plots_dir.mkdir(exist_ok=True)
 
-    # Force correct dtype for all metrics
+    # Force correct dtype
     metrics_df["episode"] = metrics_df["episode"].astype(int)
     metrics_df["total_reward"] = pd.to_numeric(metrics_df["total_reward"], errors='coerce')
     metrics_df["loss"] = pd.to_numeric(metrics_df.get("loss"), errors='coerce')
     metrics_df["ndcg@5"] = pd.to_numeric(metrics_df.get("ndcg@5"), errors='coerce')
     metrics_df["slate_mrr"] = pd.to_numeric(metrics_df.get("slate_mrr"), errors='coerce')
 
-    # Use clean background
+    # Use plain background
     plt.style.use("default")
 
-    # Plot 1: Total Reward over Episodes
+    # Determine tick positions every 10 episodes
+    xticks = metrics_df["episode"][metrics_df["episode"] % 10 == 0]
+
+    # Plot 1: Total Reward
     plt.figure()
     plt.plot(metrics_df["episode"], metrics_df["total_reward"], label="Total Reward", color='blue')
     plt.xlabel("Episode")
     plt.ylabel("Total Reward")
     plt.title("Total Reward over Episodes")
-    plt.xticks(metrics_df["episode"])
-    plt.grid(True)
+    plt.xticks(xticks)
+    plt.grid(True, linestyle='--', alpha=0.4)
     plt.legend()
     plt.savefig(plots_dir / f"{run_name}_reward.png")
     plt.close()
 
-    # Plot 2: Loss over Episodes
+    # Plot 2: Loss
     if "loss" in metrics_df and metrics_df["loss"].notnull().any():
         plt.figure()
         plt.plot(metrics_df["episode"], metrics_df["loss"], label="Loss", color='orange')
         plt.xlabel("Episode")
         plt.ylabel("Loss")
         plt.title("Training Loss over Episodes")
-        plt.xticks(metrics_df["episode"])
-        plt.grid(True)
+        plt.xticks(xticks)
+        plt.grid(True, linestyle='--', alpha=0.4)
         plt.legend()
         plt.savefig(plots_dir / f"{run_name}_loss.png")
         plt.close()
 
-    # Plot 3: Ranking Metrics (NDCG@5 and Slate MRR)
+    # Plot 3: Ranking Metrics
     has_ndcg = "ndcg@5" in metrics_df and metrics_df["ndcg@5"].notnull().any()
     has_mrr = "slate_mrr" in metrics_df and metrics_df["slate_mrr"].notnull().any()
 
     if has_ndcg or has_mrr:
         plt.figure()
         if has_ndcg:
-            plt.plot(metrics_df["episode"], metrics_df["ndcg@5"], label="NDCG@5")
+            plt.plot(metrics_df["episode"], metrics_df["ndcg@5"], label="NDCG@5", color='blue')
         if has_mrr:
-            plt.plot(metrics_df["episode"], metrics_df["slate_mrr"], label="Slate MRR")
+            plt.plot(metrics_df["episode"], metrics_df["slate_mrr"], label="Slate MRR", color='orange')
         plt.xlabel("Episode")
         plt.ylabel("Ranking Score")
         plt.title("Ranking Metrics over Episodes")
-        plt.xticks(metrics_df["episode"])
-        plt.grid(True)
+        plt.xticks(xticks)
+        plt.grid(True, linestyle='--', alpha=0.4)
         plt.legend()
         plt.savefig(plots_dir / f"{run_name}_ranking.png")
         plt.close()
-
-
 
 if __name__ == '__main__':
     app.run(main)

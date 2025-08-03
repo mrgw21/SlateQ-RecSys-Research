@@ -2,27 +2,32 @@ import tensorflow as tf
 
 
 def dcg_at_k(labels, k):
-    """Computes DCG@k for binary relevance."""
     labels = tf.cast(labels, tf.float32)
     gains = (2 ** labels - 1)[:, :k]
     discounts = tf.math.log(tf.range(2, k + 2, dtype=tf.float32))
     return tf.reduce_sum(gains / discounts, axis=1)
 
-
 def ndcg_at_k(true_items, predicted_items, k):
     """
-    Computes nDCG@k.
-    true_items: tf.Tensor of shape [batch_size], ground truth indices (0 <= idx < slate_size)
-    predicted_items: tf.Tensor of shape [batch_size, slate_size], relevance matrix (e.g., binary/multi-level)
-    k: int
+    Computes mean nDCG@k.
+    true_items: [batch_size] tensor with ground truth indices (0 ≤ idx < slate_size)
+    predicted_items: [batch_size, slate_size] tensor of ranked item indices
     """
-    relevant = tf.cast(tf.equal(predicted_items, tf.expand_dims(true_items, axis=1)), tf.float32)
+    batch_size = tf.shape(predicted_items)[0]
+    slate_size = tf.shape(predicted_items)[1]
+
+    # Binary relevance
+    relevant = tf.cast(tf.equal(predicted_items, tf.expand_dims(true_items, 1)), tf.float32)
+
+    # DCG
     dcg = dcg_at_k(relevant, k)
 
-    idcg = tf.math.log(tf.constant(2.0, dtype=tf.float32))
-    ndcg = dcg / idcg
-    return tf.reduce_mean(ndcg)
+    # IDCG: always 1 relevant item ideally at rank 1 → relevance vector is [1, 0, 0, ...]
+    ideal_relevance = tf.sort(relevant, direction='DESCENDING')
+    idcg = dcg_at_k(ideal_relevance, k)
 
+    ndcg = tf.where(idcg > 0, dcg / idcg, tf.zeros_like(dcg))
+    return tf.reduce_mean(ndcg)
 
 def slate_mrr(true_items, predicted_items, k):
     """
