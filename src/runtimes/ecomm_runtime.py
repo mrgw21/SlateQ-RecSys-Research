@@ -23,7 +23,6 @@ class ECommRuntime(runtime.TFRuntime):
         }
         self._current_state = self._network.step(input_dict)
 
-        # Convert to a proper TimeStep object
         return self._to_transition(self._current_state)
 
     def _to_time_step(self, value):
@@ -40,15 +39,21 @@ class ECommRuntime(runtime.TFRuntime):
     def _to_transition(self, value):
         interest = value.get("user_state").get("interest")
         reward = value.get("response").get("reward")
+        choice = value.get("user_state").get("choice")
+
         return ts.transition(
-            observation={"interest": interest},
+            observation={
+                "interest": interest,
+                "choice": choice
+            },
             reward=reward,
             discount=tf.ones_like(reward)
         )
 
     def observation_spec(self):
         return {
-            "interest": tf.TensorSpec(shape=(10, 10), dtype=tf.float32)
+            "interest": tf.TensorSpec(shape=(10, 10), dtype=tf.float32),
+            "choice": tf.TensorSpec(shape=(10,), dtype=tf.int32),
         }
 
     def action_spec(self):

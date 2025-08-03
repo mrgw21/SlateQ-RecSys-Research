@@ -26,14 +26,20 @@ class ECommUser(static.StaticStateModel):
 
     def specs(self):
         return ValueSpec(
-            interest=TensorFieldSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32)
+            interest=TensorFieldSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32),
+            choice=TensorFieldSpec(shape=(self.num_users,), dtype=tf.int32),
+            reward=TensorFieldSpec(shape=(self.num_users,), dtype=tf.float32)
         )
 
     def initial_state(self):
         interest = tfd.Normal(loc=0., scale=1.).sample(
             sample_shape=(self.num_users, self.num_topics)
         )
-        return value.Value(interest=interest)
+
+        choice = tf.zeros([self.num_users], dtype=tf.int32)
+        reward = tf.zeros([self.num_users], dtype=tf.float32)
+
+        return value.Value(interest=interest, choice=choice, reward=reward)
 
     def response(self, user_state, slate, item_state):
         slate_indices = slate.get('slate')
