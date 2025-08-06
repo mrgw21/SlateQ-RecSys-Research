@@ -112,7 +112,7 @@ def main(argv):
         last_choice = None
         last_reward = None
 
-        for step in range(500):
+        for step in range(100):
             clean_time_step = time_step._replace(
                 observation={"interest": time_step.observation["interest"]}
             )
@@ -141,7 +141,7 @@ def main(argv):
 
             time_step = next_time_step
 
-            if replay_buffer.num_frames().numpy() > 32:
+            if replay_buffer.num_frames().numpy() >= 64:
                 for experience, _ in dataset.take(1):
                     loss_info = agent.train(experience)
                     episode_losses.append(loss_info.loss.numpy())

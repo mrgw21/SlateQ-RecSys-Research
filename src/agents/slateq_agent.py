@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
+import copy
 
 from tf_agents.agents import tf_agent
 from tf_agents.networks import network
@@ -10,9 +11,8 @@ from tf_agents.utils import common
 
 
 class SlateQNetwork(network.Network):
-    def __init__(self, input_tensor_spec, num_items, fc_layer_params=(128, 64), name='SlateQNetwork'):
+    def __init__(self, input_tensor_spec, num_items, fc_layer_params=(256, 128, 64), name='SlateQNetwork'):
         super().__init__(input_tensor_spec={'interest': input_tensor_spec}, state_spec=(), name=name)
-        self._num_items = num_items
         self._fc_layers = [tf.keras.layers.Dense(units, activation='relu') for units in fc_layer_params]
         self._output_layer = tf.keras.layers.Dense(num_items, activation=None)
 
@@ -32,56 +32,69 @@ class SlateQPolicy(tf_policy.TFPolicy):
 
     def _distribution(self, time_step, policy_state):
         q_values, _ = self._q_network(time_step.observation, time_step.step_type)
-        top_k_indices = tf.math.top_k(q_values, k=self._slate_size).indices  # [batch_size, slate_size]
-        return tfp.distributions.Deterministic(loc=top_k_indices)
+        top_k = tf.math.top_k(q_values, k=self._slate_size)
+        return tfp.distributions.Deterministic(loc=top_k.indices)
 
     def _action(self, time_step, policy_state, seed=None):
-        dist = self._distribution(time_step, policy_state)
-        action = dist.sample(seed=seed)
+        action = self._distribution(time_step, policy_state).sample(seed=seed)
         return policy_step.PolicyStep(action=action, state=policy_state)
 
 
 class SlateQExplorationPolicy(tf_policy.TFPolicy):
-    def __init__(self, base_policy, num_items, slate_size, epsilon=0.1):
+    def __init__(self, base_policy, num_items, slate_size, epsilon=0.1, epsilon_decay=0.995, min_epsilon=0.05):
         super().__init__(base_policy.time_step_spec, base_policy.action_spec)
         self._base_policy = base_policy
         self._num_items = num_items
         self._slate_size = slate_size
-        self._epsilon = epsilon
+        self._epsilon = tf.Variable(epsilon, trainable=False, dtype=tf.float32)
+        self._epsilon_decay = epsilon_decay
+        self._min_epsilon = min_epsilon
 
     def _action(self, time_step, policy_state=(), seed=None):
         batch_size = tf.shape(time_step.observation['interest'])[0]
 
-        def random_slate():
-            return tf.random.uniform(
-                shape=(batch_size, self._slate_size),
-                minval=0,
-                maxval=self._num_items,
-                dtype=tf.int32
-            )
+        random_slate = tf.random.uniform(
+            shape=(batch_size, self._slate_size),
+            minval=0,
+            maxval=self._num_items,
+            dtype=tf.int32
+        )
 
-        def greedy_slate():
-            return self._base_policy.action(time_step).action
+        greedy_slate = self._base_policy.action(time_step).action
 
-        should_explore = tf.less(tf.random.uniform([batch_size]), self._epsilon)
-        action = tf.where(should_explore[:, tf.newaxis], random_slate(), greedy_slate())
+        should_explore = tf.less(tf.random.uniform([batch_size], dtype=tf.float32), self._epsilon)
+        should_explore = tf.expand_dims(should_explore, axis=1)
+
+        action = tf.where(should_explore, random_slate, greedy_slate)
+
+        new_epsilon = tf.maximum(self._min_epsilon, self._epsilon * self._epsilon_decay)
+        self._epsilon.assign(new_epsilon)
+
         return policy_step.PolicyStep(action=action, state=policy_state)
 
 
 class SlateQAgent(tf_agent.TFAgent):
     def __init__(self, time_step_spec, action_spec,
-                 num_users=10, num_topics=10, slate_size=5, num_items=100, learning_rate=1e-3):
-        self._train_step_counter = tf.Variable(0)
+                 num_users=10, num_topics=10, slate_size=5, num_items=100,
+                 learning_rate=1e-4,
+                 epsilon=0.1, epsilon_decay=0.995, min_epsilon=0.05,
+                 target_update_period=100):
 
+        self._train_step_counter = tf.Variable(0)
         self._num_items = num_items
         self._slate_size = slate_size
+        self._target_update_period = target_update_period
 
         input_tensor_spec = time_step_spec.observation['interest']
 
+        # Main and target Q-networks
         self._q_network = SlateQNetwork(input_tensor_spec, num_items)
+        self._target_q_network = SlateQNetwork(input_tensor_spec, num_items)
 
+        # Optimiser (lower LR)
         self._optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
+        # Greedy base policy
         base_policy = SlateQPolicy(
             time_step_spec=time_step_spec,
             action_spec=action_spec,
@@ -89,14 +102,18 @@ class SlateQAgent(tf_agent.TFAgent):
             slate_size=slate_size
         )
 
+        # Epsilon-greedy exploration policy
         self._policy = base_policy
         self._collect_policy = SlateQExplorationPolicy(
             base_policy=base_policy,
             num_items=num_items,
             slate_size=slate_size,
-            epsilon=0.1
+            epsilon=epsilon,
+            epsilon_decay=epsilon_decay,
+            min_epsilon=min_epsilon
         )
 
+        # TF-Agents base agent setup
         super().__init__(
             time_step_spec=time_step_spec,
             action_spec=action_spec,
@@ -105,6 +122,9 @@ class SlateQAgent(tf_agent.TFAgent):
             train_sequence_length=2,
             train_step_counter=self._train_step_counter
         )
+
+        # Sync target network weights with main network
+        self._target_q_network.set_weights(self._q_network.get_weights())
 
     @property
     def collect_data_spec(self):
@@ -119,7 +139,10 @@ class SlateQAgent(tf_agent.TFAgent):
         )
 
     def _initialize(self):
-        return tf.group(self._q_network.variables)
+        return tf.group(
+            *self._q_network.variables,
+            *self._target_q_network.variables
+        )
 
     def _train(self, experience, weights=None):
         obs_tm1 = tf.nest.map_structure(lambda x: x[:, 0], experience.observation)
@@ -128,33 +151,42 @@ class SlateQAgent(tf_agent.TFAgent):
         actions = experience.action[:, 1]
 
         with tf.GradientTape() as tape:
-            # Q(s, a)
             q_tm1, _ = self._q_network(obs_tm1, experience.step_type[:, 0])
-            a_one_hot = tf.one_hot(actions, depth=self._num_items)
+            q_tp1, _ = self._target_q_network(obs_tp1, experience.step_type[:, 1])
 
+            # Clip Q-values to avoid exploding updates
+            q_tm1 = tf.clip_by_value(q_tm1, -10.0, 10.0)
+            q_tp1 = tf.clip_by_value(q_tp1, -10.0, 10.0)
+
+            a_one_hot = tf.one_hot(actions, depth=self._num_items)
             q_tm1_exp = tf.expand_dims(q_tm1, axis=2)
             q_tm1_exp = tf.broadcast_to(q_tm1_exp, tf.shape(a_one_hot))
-
             q_action_values = tf.reduce_sum(q_tm1_exp * tf.cast(a_one_hot, tf.float32), axis=-1)
             q_sa = tf.reduce_mean(q_action_values, axis=-1)
 
-            # Q(s', a') for next state
-            q_tp1, _ = self._q_network(obs_tp1, experience.step_type[:, 1])
             top_k = tf.math.top_k(q_tp1, k=self._slate_size).indices
             top_k_one_hot = tf.one_hot(top_k, depth=self._num_items)
-
             q_tp1_exp = tf.expand_dims(q_tp1, axis=2)
             q_tp1_exp = tf.broadcast_to(q_tp1_exp, tf.shape(top_k_one_hot))
-
             q_top_k = tf.reduce_sum(q_tp1_exp * tf.cast(top_k_one_hot, tf.float32), axis=-1)
             q_next_mean = tf.reduce_mean(q_top_k, axis=-1)
 
-            target = rewards + 0.99 * q_next_mean
+            # Clip rewards and target
+            rewards = tf.clip_by_value(rewards, 0.0, 5.0)
+            target = tf.clip_by_value(rewards + 0.99 * q_next_mean, -10.0, 10.0)
+
             loss = tf.reduce_mean(tf.square(target - q_sa))
 
         grads = tape.gradient(loss, self._q_network.trainable_variables)
+        grads, _ = tf.clip_by_global_norm(grads, 5.0)
         self._optimizer.apply_gradients(zip(grads, self._q_network.trainable_variables))
         self._train_step_counter.assign_add(1)
 
-        return tf_agent.LossInfo(loss=loss, extra={})
+        # Polyak averaging for target network
+        tau = 0.005
+        for var, target_var in zip(self._q_network.variables, self._target_q_network.variables):
+            target_var.assign(tau * var + (1.0 - tau) * target_var)
 
+        tf.print("Q_tm1[min,max]:", tf.reduce_min(q_tm1), tf.reduce_max(q_tm1), " | Loss:", loss)
+
+        return tf_agent.LossInfo(loss=loss, extra={})
