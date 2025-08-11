@@ -205,7 +205,7 @@ def main(argv):
 
         ndcg = ndcg_at_k(last_slate, relevance, k=slate_size)
         mrr = slate_mrr(last_slate, relevance, k=slate_size)
-        avg_loss = float(np.mean(episode_losses)) if episode_losses else None
+        avg_loss = float(np.mean(episode_losses)) if episode_losses else 0.0
 
         logger.log({
             "episode": episode,
