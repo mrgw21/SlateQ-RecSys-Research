@@ -82,12 +82,11 @@ def ecomm_story(num_users=10, num_items=100, slate_size=5):
     ), dependencies=())
 
     response_var.value = value_def(
-        fn=lambda user_state, action, item_state:
-            user_model.response(
-                user_state,
-                value.Value(slate=action.get("act")),
-                item_state
-            ),
+        fn=lambda user_state, action, item_state: user_model.response(
+            user_state,
+            value.Value(slate=action.get("act") if hasattr(action, "get") else action),
+            item_state
+        ),
         dependencies=(user_var, action_var, item_var.previous)
     )
 

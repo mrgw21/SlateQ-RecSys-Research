@@ -10,17 +10,94 @@ from tf_agents.policies import tf_policy
 from tf_agents.utils import common
 
 
+import tensorflow as tf
+from tf_agents.networks import network
+
+class NoisyDense(tf.keras.layers.Layer):
+    """Factorized NoisyNet layer (Fortunato et al., 2018)."""
+    def __init__(self, units, activation=None, sigma_init=0.5, **kw):
+        super().__init__()
+        self.units = units
+        self.activation = tf.keras.activations.get(activation)
+        self.sigma_init = float(sigma_init)
+
+    def build(self, input_shape):
+        in_dim = int(input_shape[-1])
+        mu_init = tf.keras.initializers.VarianceScaling(scale=2.0)
+        self.w_mu = self.add_weight("w_mu", shape=[in_dim, self.units], initializer=mu_init)
+        self.b_mu = self.add_weight("b_mu", shape=[self.units], initializer="zeros")
+
+        self.w_sigma = self.add_weight("w_sigma", shape=[in_dim, self.units],
+            initializer=tf.keras.initializers.Constant(self.sigma_init / tf.sqrt(tf.cast(in_dim, tf.float32))))
+        self.b_sigma = self.add_weight("b_sigma", shape=[self.units],
+            initializer=tf.keras.initializers.Constant(self.sigma_init / tf.sqrt(tf.cast(self.units, tf.float32))))
+
+    @staticmethod
+    def _f(x):
+        return tf.sign(x) * tf.sqrt(tf.abs(x))
+
+    def call(self, x, training=False):
+        if training:
+            eps_in  = tf.random.normal([x.shape[-1]])
+            eps_out = tf.random.normal([self.units])
+            f_in, f_out = self._f(eps_in), self._f(eps_out)
+            w_eps = tf.tensordot(f_in, f_out, axes=0)
+            w = self.w_mu + self.w_sigma * w_eps
+            b = self.b_mu + self.b_sigma * f_out
+            y = tf.linalg.matmul(x, w) + b
+        else:
+            y = tf.linalg.matmul(x, self.w_mu) + self.b_mu
+        return self.activation(y) if self.activation is not None else y
+
+# -------- SlateQNetwork with dueling + noisy --------
 class SlateQNetwork(network.Network):
-    def __init__(self, input_tensor_spec, num_items, fc_layer_params=(256, 128, 64), name='SlateQNetwork'):
+    def __init__(self,
+                 input_tensor_spec,
+                 num_items,
+                 fc_layer_params=(256, 128, 64),
+                 dueling=True,
+                 use_noisy=False,
+                 l2=1e-5,
+                 name='SlateQNetwork'):
         super().__init__(input_tensor_spec={'interest': input_tensor_spec}, state_spec=(), name=name)
-        self._fc_layers = [tf.keras.layers.Dense(units, activation='relu') for units in fc_layer_params]
-        self._output_layer = tf.keras.layers.Dense(num_items, activation=None)
+        self._dueling = dueling
+        self._num_items = int(num_items)
+        self._use_noisy = use_noisy
+        reg = tf.keras.regularizers.l2(l2) if l2 else None
+
+        self._blocks = []
+        for units in fc_layer_params:
+            self._blocks.append(tf.keras.Sequential([
+                tf.keras.layers.Dense(
+                    units,
+                    activation=None,
+                    kernel_initializer=tf.keras.initializers.VarianceScaling(scale=2.0),
+                    kernel_regularizer=reg),
+                tf.keras.layers.LayerNormalization(epsilon=1e-5),
+                tf.keras.layers.Activation('gelu')
+            ]))
+
+        # Heads
+        Dense = NoisyDense if use_noisy else tf.keras.layers.Dense
+        if dueling:
+            self._adv = Dense(self._num_items, activation=None, kernel_regularizer=reg)
+            self._val = Dense(1, activation=None, kernel_regularizer=reg)
+        else:
+            self._q = Dense(self._num_items, activation=None, kernel_regularizer=reg)
 
     def call(self, inputs, step_type=(), network_state=(), training=False):
-        x = inputs['interest']
-        for layer in self._fc_layers:
-            x = layer(x, training=training)
-        q_values = self._output_layer(x)
+        x = tf.convert_to_tensor(inputs['interest'])
+        for blk in self._blocks:
+            x = blk(x, training=training)
+
+        if self._dueling:
+            adv = self._adv(x, training=training)
+            val = self._val(x, training=training)
+            adv_centered = adv - tf.reduce_mean(adv, axis=-1, keepdims=True)
+            q_values = val + adv_centered
+        else:
+            q_values = self._q(x, training=training)
+
         return q_values, network_state
 
 
@@ -41,49 +118,62 @@ class SlateQPolicy(tf_policy.TFPolicy):
 
 
 class SlateQExplorationPolicy(tf_policy.TFPolicy):
-    def __init__(self, base_policy, num_items, slate_size, epsilon=0.1, epsilon_decay=0.995, min_epsilon=0.05):
+    def __init__(self,
+                 base_policy,
+                 num_items,
+                 slate_size,
+                 epsilon=0.3,
+                 steps_to_min=60_000,
+                 min_epsilon=0.10):
         super().__init__(base_policy.time_step_spec, base_policy.action_spec)
         self._base_policy = base_policy
-        self._num_items = num_items
-        self._slate_size = slate_size
-        self._epsilon = tf.Variable(epsilon, trainable=False, dtype=tf.float32)
-        self._epsilon_decay = epsilon_decay
-        self._min_epsilon = min_epsilon
+        self._num_items = int(num_items)
+        self._slate_size = int(slate_size)
+
+        self._epsilon = tf.Variable(float(epsilon), trainable=False, dtype=tf.float32)
+        decay = (float(min_epsilon) / float(epsilon)) ** (1.0 / float(steps_to_min))
+        self._epsilon_decay = tf.constant(decay, dtype=tf.float32)
+        self._min_epsilon = tf.constant(float(min_epsilon), dtype=tf.float32)
 
     def _action(self, time_step, policy_state=(), seed=None):
         batch_size = tf.shape(time_step.observation['interest'])[0]
 
-        random_slate = tf.random.uniform(
-            shape=(batch_size, self._slate_size),
-            minval=0,
-            maxval=self._num_items,
-            dtype=tf.int32
-        )
+        rand_scores = tf.random.uniform([batch_size, self._num_items], dtype=tf.float32, seed=seed)
+        random_slate = tf.math.top_k(rand_scores, k=self._slate_size).indices
 
         greedy_slate = self._base_policy.action(time_step).action
 
-        should_explore = tf.less(tf.random.uniform([batch_size], dtype=tf.float32), self._epsilon)
-        should_explore = tf.expand_dims(should_explore, axis=1)
+        explore_mask = tf.less(tf.random.uniform([batch_size], dtype=tf.float32, seed=seed),
+                               self._epsilon)
+        explore_mask = tf.expand_dims(explore_mask, 1)
 
-        action = tf.where(should_explore, random_slate, greedy_slate)
-
-        new_epsilon = tf.maximum(self._min_epsilon, self._epsilon * self._epsilon_decay)
-        self._epsilon.assign(new_epsilon)
-
+        action = tf.where(explore_mask, random_slate, greedy_slate)
         return policy_step.PolicyStep(action=action, state=policy_state)
+
+    def decay_epsilon(self, steps=1):
+        if steps <= 0:
+            return
+        new_eps = self._epsilon * tf.pow(self._epsilon_decay, steps)
+        self._epsilon.assign(tf.maximum(self._min_epsilon, new_eps))
+
+    @property
+    def epsilon(self):
+        return float(self._epsilon.numpy())
 
 
 class SlateQAgent(tf_agent.TFAgent):
     def __init__(self, time_step_spec, action_spec,
                  num_users=10, num_topics=10, slate_size=5, num_items=100,
-                 learning_rate=1e-4,
+                 learning_rate=1e-5,
                  epsilon=0.1, epsilon_decay=0.995, min_epsilon=0.05,
-                 target_update_period=100):
+                 target_update_period=100,
+                 gamma=0.95,
+                 reward_scale=5.0):
 
         self._train_step_counter = tf.Variable(0)
-        self._num_items = num_items
-        self._slate_size = slate_size
-        self._target_update_period = target_update_period
+        self._num_items = int(num_items)
+        self._slate_size = int(slate_size)
+        self._target_update_period = int(target_update_period)
 
         input_tensor_spec = time_step_spec.observation['interest']
 
@@ -91,7 +181,13 @@ class SlateQAgent(tf_agent.TFAgent):
         self._q_network = SlateQNetwork(input_tensor_spec, num_items)
         self._target_q_network = SlateQNetwork(input_tensor_spec, num_items)
 
-        # Optimiser (lower LR)
+        # Build both nets once (dummy forward pass) BEFORE set_weights
+        dummy_obs = {"interest": tf.zeros([1] + list(input_tensor_spec.shape), dtype=tf.float32)}
+        dummy_step = tf.zeros([1], dtype=tf.int32)
+        self._q_network(dummy_obs, dummy_step, training=False)
+        self._target_q_network(dummy_obs, dummy_step, training=False)
+
+        # Optimizer
         self._optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
         # Greedy base policy
@@ -109,7 +205,7 @@ class SlateQAgent(tf_agent.TFAgent):
             num_items=num_items,
             slate_size=slate_size,
             epsilon=epsilon,
-            epsilon_decay=epsilon_decay,
+            steps_to_min=60_000,
             min_epsilon=min_epsilon
         )
 
@@ -123,7 +219,11 @@ class SlateQAgent(tf_agent.TFAgent):
             train_step_counter=self._train_step_counter
         )
 
-        # Sync target network weights with main network
+        self._gamma = tf.constant(gamma, dtype=tf.float32)
+        self._reward_scale = tf.constant(reward_scale, dtype=tf.float32)
+        self._huber = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
+
+        # Sync target network weights with main network (now that they're built)
         self._target_q_network.set_weights(self._q_network.get_weights())
 
     @property
@@ -145,48 +245,59 @@ class SlateQAgent(tf_agent.TFAgent):
         )
 
     def _train(self, experience, weights=None):
+        # t0 / t1 slices
         obs_tm1 = tf.nest.map_structure(lambda x: x[:, 0], experience.observation)
         obs_tp1 = tf.nest.map_structure(lambda x: x[:, 1], experience.observation)
-        rewards = experience.reward[:, 1]
-        actions = experience.action[:, 1]
+        actions   = experience.action[:, 1]
+        rewards   = experience.reward[:, 1]
+        discounts = tf.cast(experience.discount[:, 1], tf.float32)
 
         with tf.GradientTape() as tape:
             q_tm1, _ = self._q_network(obs_tm1, experience.step_type[:, 0])
-            q_tp1, _ = self._target_q_network(obs_tp1, experience.step_type[:, 1])
 
-            # Clip Q-values to avoid exploding updates
-            q_tm1 = tf.clip_by_value(q_tm1, -10.0, 10.0)
-            q_tp1 = tf.clip_by_value(q_tp1, -10.0, 10.0)
+            q_tp1_online, _ = self._q_network(obs_tp1, experience.step_type[:, 1])
+            q_tp1_target, _  = self._target_q_network(obs_tp1, experience.step_type[:, 1])
 
-            a_one_hot = tf.one_hot(actions, depth=self._num_items)
-            q_tm1_exp = tf.expand_dims(q_tm1, axis=2)
-            q_tm1_exp = tf.broadcast_to(q_tm1_exp, tf.shape(a_one_hot))
-            q_action_values = tf.reduce_sum(q_tm1_exp * tf.cast(a_one_hot, tf.float32), axis=-1)
-            q_sa = tf.reduce_mean(q_action_values, axis=-1)
+            q_sa_items = tf.gather(q_tm1, actions, axis=1, batch_dims=1)
+            q_sa = tf.reduce_mean(q_sa_items, axis=-1)
 
-            top_k = tf.math.top_k(q_tp1, k=self._slate_size).indices
-            top_k_one_hot = tf.one_hot(top_k, depth=self._num_items)
-            q_tp1_exp = tf.expand_dims(q_tp1, axis=2)
-            q_tp1_exp = tf.broadcast_to(q_tp1_exp, tf.shape(top_k_one_hot))
-            q_top_k = tf.reduce_sum(q_tp1_exp * tf.cast(top_k_one_hot, tf.float32), axis=-1)
-            q_next_mean = tf.reduce_mean(q_top_k, axis=-1)
+            # Double-Q target: argmax_k on ONLINE, evaluate with TARGET
+            next_topk_idx = tf.math.top_k(q_tp1_online, k=self._slate_size).indices
+            q_tp1_eval_items = tf.gather(q_tp1_target, next_topk_idx, axis=1, batch_dims=1)
+            q_next_mean = tf.reduce_mean(q_tp1_eval_items, axis=-1)
 
-            # Clip rewards and target
-            rewards = tf.clip_by_value(rewards, 0.0, 5.0)
-            target = tf.clip_by_value(rewards + 0.99 * q_next_mean, -10.0, 10.0)
+            # Reward scaling
+            r = tf.clip_by_value(rewards, 0.0, self._reward_scale) / self._reward_scale 
 
-            loss = tf.reduce_mean(tf.square(target - q_sa))
+            # Target (masking by discount for terminals)
+            target = tf.stop_gradient(r + self._gamma * discounts * q_next_mean)
 
+            # Huber TD loss
+            per_example_loss = self._huber(target, q_sa)
+            if weights is not None:
+                per_example_loss *= tf.cast(weights, tf.float32)
+
+            reg_loss = tf.add_n(self._q_network.losses) if self._q_network.losses else 0.0
+            loss = tf.reduce_mean(per_example_loss) + reg_loss
+
+        # Optimizer step
         grads = tape.gradient(loss, self._q_network.trainable_variables)
         grads, _ = tf.clip_by_global_norm(grads, 5.0)
         self._optimizer.apply_gradients(zip(grads, self._q_network.trainable_variables))
         self._train_step_counter.assign_add(1)
 
-        # Polyak averaging for target network
+        # Soft target update (Polyak)
         tau = 0.005
-        for var, target_var in zip(self._q_network.variables, self._target_q_network.variables):
-            target_var.assign(tau * var + (1.0 - tau) * target_var)
+        for v, tv in zip(self._q_network.variables, self._target_q_network.variables):
+            tv.assign(tau * v + (1.0 - tau) * tv)
 
-        tf.print("Q_tm1[min,max]:", tf.reduce_min(q_tm1), tf.reduce_max(q_tm1), " | Loss:", loss)
+        # Logging
+        td_err = target - q_sa
+        tf.print(
+            "ε=", getattr(self._collect_policy, "_epsilon", -1.0),
+            "Q[min,max]=", tf.reduce_min(q_tm1), tf.reduce_max(q_tm1),
+            "TD|mean|=", tf.reduce_mean(tf.abs(td_err)),
+            "Loss=", loss
+        )
 
-        return tf_agent.LossInfo(loss=loss, extra={})
+        return tf_agent.LossInfo(loss=loss, extra={"td_error": td_err})

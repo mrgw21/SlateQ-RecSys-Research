@@ -9,6 +9,16 @@ class ECommRuntime(runtime.TFRuntime):
         super().__init__(network)
         self._current_state = self._network.initial_step()
 
+        # Dynamically detect observation shapes for specs
+        user_state = self._current_state.get("user_state", {})
+        interest = user_state.get("interest")
+        choice = user_state.get("choice")
+
+        # Fallbacks for safety if keys not found
+        self._num_users = int(interest.shape[0]) if interest is not None else 10
+        self._interest_dim = int(interest.shape[1]) if interest is not None and len(interest.shape) > 1 else 10
+        self._choice_shape = (self._num_users,) if choice is not None else (self._num_users,)
+
     def reset(self):
         self._current_state = self._network.initial_step()
         return self._to_time_step(self._current_state)
@@ -22,7 +32,6 @@ class ECommRuntime(runtime.TFRuntime):
             "item_state": self._current_state["item_state"],
         }
         self._current_state = self._network.step(input_dict)
-
         return self._to_transition(self._current_state)
 
     def _to_time_step(self, value):
@@ -52,8 +61,8 @@ class ECommRuntime(runtime.TFRuntime):
 
     def observation_spec(self):
         return {
-            "interest": tf.TensorSpec(shape=(10, 10), dtype=tf.float32),
-            "choice": tf.TensorSpec(shape=(10,), dtype=tf.int32),
+            "interest": tf.TensorSpec(shape=(self._num_users, self._interest_dim), dtype=tf.float32),
+            "choice": tf.TensorSpec(shape=(self._num_users,), dtype=tf.int32),
         }
 
     def action_spec(self):
@@ -61,9 +70,9 @@ class ECommRuntime(runtime.TFRuntime):
 
     def time_step_spec(self):
         return ts.TimeStep(
-            step_type=tf.TensorSpec(shape=(10,), dtype=tf.int32),
-            reward=tf.TensorSpec(shape=(10,), dtype=tf.float32),
-            discount=tf.TensorSpec(shape=(10,), dtype=tf.float32),
+            step_type=tf.TensorSpec(shape=(self._num_users,), dtype=tf.int32),
+            reward=tf.TensorSpec(shape=(self._num_users,), dtype=tf.float32),
+            discount=tf.TensorSpec(shape=(self._num_users,), dtype=tf.float32),
             observation=self.observation_spec()
         )
 
