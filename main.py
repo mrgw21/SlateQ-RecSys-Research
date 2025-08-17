@@ -71,15 +71,12 @@ def make_slateq(time_step_spec, action_spec, **kwargs):
     )
 
 def main(argv):
-    # parse gin
     gin.parse_config_files_and_bindings(FLAGS.gin_files, FLAGS.gin_bindings)
 
-    # pick agent: positional arg after flags; default "slateq"
     agent_name = argv[1] if len(argv) > 1 else "slateq"
     if agent_name not in REGISTRY:
         raise ValueError(f"Unknown agent '{agent_name}'. Options: {list(REGISTRY)}")
 
-    # env/story config (keep your current numbers or pull from gin if you wish)
     num_users = 10
     slate_size = 5
     num_items = 100
@@ -89,7 +86,6 @@ def main(argv):
     network = ecomm_story(num_users=num_users, num_items=num_items, slate_size=slate_size)
     rt = ECommRuntime(network=network)
 
-    # action spec (same as before)
     action_spec = tensor_spec.BoundedTensorSpec(
         shape=(slate_size,),
         dtype=tf.int32,
@@ -97,12 +93,15 @@ def main(argv):
         maximum=num_items - 1
     )
 
-    # build a time_step_spec consistent with your loop
     agent_time_step_spec = ts.TimeStep(
         step_type=tf.TensorSpec(shape=(), dtype=tf.int32),
         reward=tf.TensorSpec(shape=(), dtype=tf.float32),
         discount=tf.TensorSpec(shape=(), dtype=tf.float32),
-        observation={"interest": tf.TensorSpec(shape=(10,), dtype=tf.float32)},
+        observation={
+            "interest": tf.TensorSpec(shape=(10,), dtype=tf.float32),
+            "choice": tf.TensorSpec(shape=(), dtype=tf.int32),
+            "item_features": tf.TensorSpec(shape=(num_items, 10), dtype=tf.float32),
+        },
     )
 
     # instantiate agent through registry
@@ -112,15 +111,18 @@ def main(argv):
         num_users=num_users,
         slate_size=slate_size,
         num_items=num_items,
-        num_topics=10,  # keep your current value
+        num_topics=10,
     )
 
-    # warm up policy call (works for both agents)
     dummy_ts = ts.TimeStep(
         step_type=tf.zeros((num_users,), tf.int32),
         reward=tf.zeros((num_users,), tf.float32),
         discount=tf.ones((num_users,), tf.float32),
-        observation={"interest": tf.zeros((num_users, 10), tf.float32)},
+        observation={
+            "interest": tf.zeros((num_users, 10), tf.float32),
+            "choice": tf.zeros((num_users,), tf.int32),
+            "item_features": tf.zeros((num_users, num_items, 10), tf.float32),
+        },
     )
     _ = agent.policy.action(dummy_ts)
 
@@ -155,10 +157,7 @@ def main(argv):
             dataset_iter = iter(dataset)
 
         for step in range(steps_per_episode):
-            clean_time_step = time_step._replace(
-                observation={"interest": time_step.observation["interest"]}
-            )
-            action_step = agent.collect_policy.action(clean_time_step)
+            action_step = agent.collect_policy.action(time_step)
             action = action_step.action
             next_time_step = rt.step(action)
 
@@ -169,17 +168,11 @@ def main(argv):
 
             # write transition only if learning
             if getattr(agent, "is_learning", True):
-                cleaned_next = next_time_step._replace(
-                    observation={"interest": next_time_step.observation["interest"]}
-                )
-                cleaned_curr = time_step._replace(
-                    observation={"interest": time_step.observation["interest"]}
-                )
-                exp = trajectory_lib.from_transition(cleaned_curr, action_step, cleaned_next)
+                exp = trajectory_lib.from_transition(time_step, action_step, next_time_step)
                 replay_buffer.add_batch(exp)
 
                 # train after warmup
-                if replay_buffer.num_frames().numpy() >= 64:
+                if replay_buffer.num_frames().numpy() >= 5000:
                     try:
                         experience, _ = next(dataset_iter)
                     except StopIteration:
@@ -196,7 +189,6 @@ def main(argv):
 
             time_step = next_time_step
 
-        # Ranking metrics for the *last* slate
         relevance = np.zeros_like(last_slate)
         for i in range(num_users):
             idx = last_choice[i]

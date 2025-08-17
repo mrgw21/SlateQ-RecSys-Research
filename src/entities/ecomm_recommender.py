@@ -25,7 +25,7 @@ class ECommRecommender(StaticStateModel):
     def specs(self):
         return value.ValueSpec(
             rec_features=TensorFieldSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32),
-            slate=TensorFieldSpec(shape=(self.num_users, self.slate_size), dtype=tf.int32)
+            slate=TensorFieldSpec(shape=(self.num_users, self.slate_size), dtype=tf.int32),
         )
 
     def initial_state(self):
@@ -33,22 +33,21 @@ class ECommRecommender(StaticStateModel):
             shape=(self.num_users, self.num_topics),
             minval=-1.0,
             maxval=1.0,
-            dtype=tf.float32
+            dtype=tf.float32,
         )
         slate = tf.zeros((self.num_users, self.slate_size), dtype=tf.int32)
-        
         return value.Value(rec_features=rec_features, slate=slate)
 
     def next_state(self, previous_state, action):
-        return previous_state
+        agent_slate = action.get("act")  # [num_users, slate_size]
+        rec_features = previous_state.get("rec_features")
 
-    def action(self, state, previous_action):
-        slate = state.get('agent_slate')
-        if slate is None:
-            raise ValueError("Missing 'agent_slate' in state.")
-        if slate.shape != (self.num_users, self.slate_size):
-            raise ValueError(f"Expected agent_slate shape {(self.num_users, self.slate_size)}, got {slate.shape}")
-        return value.Value(slate=slate)
+        # Optional: static shape guards (safe because num_users/slate_size are fixed)
+        agent_slate = tf.ensure_shape(agent_slate, (self.num_users, self.slate_size))
+        rec_features = tf.ensure_shape(rec_features, (self.num_users, self.num_topics))
 
+        return value.Value(rec_features=rec_features, slate=agent_slate)
+
+    # Optional: not strictly used by the story, but harmless to keep for clarity.
     def action_spec(self):
         return tf.TensorSpec(shape=(self.num_users, self.slate_size), dtype=tf.int32, name="slate")

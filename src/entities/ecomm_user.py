@@ -19,72 +19,60 @@ class TensorFieldSpec(FieldSpec):
 
 @gin.configurable
 class ECommUser(static.StaticStateModel):
-    def __init__(self, num_topics=10, num_users=1):
+    def __init__(self, num_topics=10, num_users=1, beta=5.0, reward_mode="sigmoid"):
         super().__init__()
         self.num_topics = num_topics
-        self.num_users = num_users
+        self.num_users  = num_users
+        self.beta       = beta             # temperature for choice model
+        self.reward_mode = reward_mode     # "sigmoid" | "clip01" | "raw"
 
     def specs(self):
         return ValueSpec(
             interest=TensorFieldSpec(shape=(self.num_users, self.num_topics), dtype=tf.float32),
-            choice=TensorFieldSpec(shape=(self.num_users,), dtype=tf.int32),
-            reward=TensorFieldSpec(shape=(self.num_users,), dtype=tf.float32)
+            choice  =TensorFieldSpec(shape=(self.num_users,), dtype=tf.int32),
+            reward  =TensorFieldSpec(shape=(self.num_users,), dtype=tf.float32)
         )
 
     def initial_state(self):
-        interest = tfd.Normal(loc=0., scale=1.).sample(
-            sample_shape=(self.num_users, self.num_topics)
+        interest = tfd.Normal(loc=0., scale=1.).sample((self.num_users, self.num_topics))
+        return value.Value(
+            interest=interest,
+            choice=tf.zeros([self.num_users], dtype=tf.int32),
+            reward=tf.zeros([self.num_users], dtype=tf.float32),
         )
 
-        choice = tf.zeros([self.num_users], dtype=tf.int32)
-        reward = tf.zeros([self.num_users], dtype=tf.float32)
-
-        return value.Value(interest=interest, choice=choice, reward=reward)
 
     def response(self, user_state, slate, item_state):
+        # slate_indices: [U, K]
         slate_indices = slate.get('slate')
-        features = item_state.get('features')
-        gathered_features = tf.gather(features, slate_indices)
+        features = item_state.get('features')                     # [N, T]
+        gathered = tf.gather(features, slate_indices)             # [U, K, T]
 
-        interest = user_state.get('interest')
-        interest_expanded = tf.expand_dims(interest, axis=1)
+        interest = user_state.get('interest')                     # [U, T]
+        # Affinity v(s,i) = dot(user, item)
+        affinities = tf.einsum('ut,ukt->uk', interest, gathered)  # [U, K]
 
-        affinities = tf.reduce_sum(interest_expanded * gathered_features, axis=-1)
-        affinities = affinities / (tf.norm(affinities, axis=1, keepdims=True) + 1e-8)
+        # Click model P(i|s,A) ~ softmax(beta * v)
+        logits = self.beta * affinities                           # [U, K]
+        choice = tf.cast(tf.random.categorical(logits, 1)[:, 0], tf.int32)  # [U]
 
-        choice = tf.map_fn(
-            lambda x: tfd.Categorical(logits=x).sample(),
-            affinities,
-            fn_output_signature=tf.int32
-        )
-        reward = tf.gather(affinities, choice[:, tf.newaxis], batch_dims=1)
-        reward = tf.cast(reward, tf.float32)
+        # Reward from chosen item
+        reward_raw = tf.gather(affinities, choice[:, None], batch_dims=1)    # [U,1]
+        reward_raw = tf.squeeze(reward_raw, axis=1)                          # [U]
 
-        return value.Value(choice=choice, reward=reward)
+        # Bound/scale reward for stability and metrics
+        if self.reward_mode == "sigmoid":
+            reward = tf.nn.sigmoid(reward_raw)                 # to (0,1)
+        elif self.reward_mode == "clip01":
+            # Min-max per-user over the slate to [0,1]
+            a_min = tf.reduce_min(affinities, axis=1, keepdims=True)
+            a_max = tf.reduce_max(affinities, axis=1, keepdims=True)
+            denom = tf.maximum(a_max - a_min, 1e-6)
+            norm = (affinities - a_min) / denom                # [U,K]
+            reward = tf.gather(norm, choice[:, None], batch_dims=1)[:, 0]
+        else:
+            reward = tf.cast(reward_raw, tf.float32)           # "raw"
 
-    def response(self, user_state, slate, item_state):
-        slate_indices = slate.get('slate')  # shape: [num_users, slate_size]
-        features = item_state.get('features')
-
-        # Gather features for the selected items in the slate
-        gathered_features = tf.gather(features, slate_indices)  # [num_users, slate_size, num_topics]
-
-        interest = user_state.get('interest')  # [num_users, num_topics]
-        interest_expanded = tf.expand_dims(interest, axis=1)  # [num_users, 1, num_topics]
-
-        affinities = tf.reduce_sum(interest_expanded * gathered_features, axis=-1)  # [num_users, slate_size]
-
-        # Sample one item from slate
-        choice = tf.map_fn(
-            lambda x: tf.cast(tf.random.categorical(tf.expand_dims(x, 0), 1)[0, 0], tf.int32),
-            affinities,
-            fn_output_signature=tf.int32
-        )
-
-        # Reward = affinity of chosen item
-        reward = tf.gather(affinities, choice[:, tf.newaxis], batch_dims=1)
-        reward = tf.squeeze(reward, axis=1)
-
-        return value.Value(choice=choice, reward=reward)
+        return value.Value(choice=choice, reward=tf.cast(reward, tf.float32))
 
 

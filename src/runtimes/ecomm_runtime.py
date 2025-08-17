@@ -14,10 +14,21 @@ class ECommRuntime(runtime.TFRuntime):
         interest = user_state.get("interest")
         choice = user_state.get("choice")
 
-        # Fallbacks for safety if keys not found
+        item_state = self._current_state.get("item_state", {})
+        item_feats = item_state.get("features")
+
+        # Fallbacks
         self._num_users = int(interest.shape[0]) if interest is not None else 10
         self._interest_dim = int(interest.shape[1]) if interest is not None and len(interest.shape) > 1 else 10
         self._choice_shape = (self._num_users,) if choice is not None else (self._num_users,)
+
+        # Catalog shape (fallback if item_feats is None)
+        if item_feats is not None:
+            self._num_items = int(item_feats.shape[0])
+            self._num_topics = int(item_feats.shape[1]) if len(item_feats.shape) > 1 else self._interest_dim
+        else:
+            self._num_items = 100
+            self._num_topics = self._interest_dim  # default to interest dim
 
     def reset(self):
         self._current_state = self._network.initial_step()
@@ -35,35 +46,54 @@ class ECommRuntime(runtime.TFRuntime):
         return self._to_transition(self._current_state)
 
     def _to_time_step(self, value):
-        interest = value.get("user_state").get("interest")
-        num_users = tf.shape(interest)[0]
+        interest   = value.get("user_state").get("interest")
+        item_feats = value.get("item_state").get("features")
+        num_users  = tf.shape(interest)[0]
+        choice0    = tf.zeros([num_users], dtype=tf.int32)
+
+        item_feats_b = tf.tile(tf.expand_dims(item_feats, axis=0), [num_users, 1, 1])
 
         return ts.TimeStep(
             step_type=tf.fill([num_users], ts.StepType.FIRST),
-            reward=tf.zeros([num_users], dtype=tf.float32),
-            discount=tf.ones([num_users], dtype=tf.float32),
-            observation={"interest": interest}
+            reward=tf.zeros([num_users], tf.float32),
+            discount=tf.ones([num_users], tf.float32),
+            observation={
+                "interest": interest,
+                "choice":   choice0,
+                "item_features": item_feats_b,
+            },
         )
 
+    # ECommRuntime._to_transition
     def _to_transition(self, value):
-        interest = value.get("user_state").get("interest")
-        reward = value.get("response").get("reward")
-        choice = value.get("user_state").get("choice")
+        interest   = value.get("user_state").get("interest")
+        reward     = value.get("response").get("reward")
+        choice     = value.get("response").get("choice")
+        item_feats = value.get("item_state").get("features")
+
+        num_users  = tf.shape(interest)[0]
+        item_feats_b = tf.tile(tf.expand_dims(item_feats, axis=0), [num_users, 1, 1])
 
         return ts.transition(
             observation={
                 "interest": interest,
-                "choice": choice
+                "choice":   choice,
+                "item_features": item_feats_b,
             },
             reward=reward,
-            discount=tf.ones_like(reward)
+            discount=tf.ones_like(reward),
         )
 
+    # ECommRuntime.observation_spec
     def observation_spec(self):
         return {
             "interest": tf.TensorSpec(shape=(self._num_users, self._interest_dim), dtype=tf.float32),
-            "choice": tf.TensorSpec(shape=(self._num_users,), dtype=tf.int32),
+            "choice":   tf.TensorSpec(shape=(self._num_users,), dtype=tf.int32),
+            "item_features": tf.TensorSpec(
+                shape=(self._num_users, self._num_items, self._num_topics), dtype=tf.float32
+            ),
         }
+
 
     def action_spec(self):
         return self._network.get_action_spec()
