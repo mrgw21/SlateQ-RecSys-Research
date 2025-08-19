@@ -68,12 +68,14 @@ def make_slateq(time_step_spec, action_spec, **kwargs):
         num_topics=kwargs.get("num_topics", 10),
         slate_size=kwargs.get("slate_size"),
         num_items=kwargs.get("num_items"),
-
-        epsilon=0.2,
-        min_epsilon=0.02,
-        epsilon_decay_steps=50_000,   # ~first 250 eps @ 200 steps/ep
-        target_update_period=500,
-        learning_rate=5e-4,
+        # hyperparams:
+        learning_rate=kwargs.get("learning_rate", 1e-3),
+        epsilon=kwargs.get("epsilon", 0.2),
+        min_epsilon=kwargs.get("min_epsilon", 0.05),
+        epsilon_decay_steps=kwargs.get("epsilon_decay_steps", 20000),
+        target_update_period=kwargs.get("target_update_period", 1000),
+        gamma=kwargs.get("gamma", 0.95),
+        beta=kwargs.get("beta", 5.0),
     )
 
 def main(argv):
@@ -86,7 +88,7 @@ def main(argv):
     num_users = 10
     slate_size = 5
     num_items = 100
-    num_episodes = 1000
+    num_episodes = 600
     steps_per_episode = 200
 
     network = ecomm_story(num_users=num_users, num_items=num_items, slate_size=slate_size)
@@ -118,6 +120,7 @@ def main(argv):
         slate_size=slate_size,
         num_items=num_items,
         num_topics=10,
+        epsilon_decay_steps=int(0.6 * num_episodes * steps_per_episode),
     )
 
     if hasattr(agent.collect_policy, "epsilon"):
@@ -234,8 +237,8 @@ def main(argv):
     from pathlib import Path
     metrics_df = pd.read_csv(logger.csv_file)
     run_name = logger.log_dir.name
-    plots_dir = Path("plots")
-    plots_dir.mkdir(exist_ok=True)
+    plots_dir = Path("plots") / agent_name
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     # Force correct dtype
     metrics_df["episode"] = metrics_df["episode"].astype(int)
