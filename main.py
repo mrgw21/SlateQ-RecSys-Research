@@ -68,6 +68,12 @@ def make_slateq(time_step_spec, action_spec, **kwargs):
         num_topics=kwargs.get("num_topics", 10),
         slate_size=kwargs.get("slate_size"),
         num_items=kwargs.get("num_items"),
+
+        epsilon=0.2,
+        min_epsilon=0.02,
+        epsilon_decay_steps=50_000,   # ~first 250 eps @ 200 steps/ep
+        target_update_period=500,
+        learning_rate=5e-4,
     )
 
 def main(argv):
@@ -80,7 +86,7 @@ def main(argv):
     num_users = 10
     slate_size = 5
     num_items = 100
-    num_episodes = 300
+    num_episodes = 1000
     steps_per_episode = 200
 
     network = ecomm_story(num_users=num_users, num_items=num_items, slate_size=slate_size)
@@ -113,6 +119,9 @@ def main(argv):
         num_items=num_items,
         num_topics=10,
     )
+
+    if hasattr(agent.collect_policy, "epsilon"):
+        print(f"Init ε = {agent.collect_policy.epsilon:.3f}")
 
     dummy_ts = ts.TimeStep(
         step_type=tf.zeros((num_users,), tf.int32),
@@ -180,7 +189,7 @@ def main(argv):
                         experience, _ = next(dataset_iter)
                     loss_info = agent.train(experience)
                     episode_losses.append(float(loss_info.loss.numpy()))
-                    if step % 1000 == 0:
+                    if step % 500 == 0:
                         print(f"[Episode {episode}] Step {step} | Loss: {loss_info.loss.numpy():.4f}")
 
                 # per-step epsilon decay if available
@@ -238,8 +247,8 @@ def main(argv):
     # Use plain background
     plt.style.use("default")
 
-    # Determine tick positions every 30 episodes
-    xticks = metrics_df["episode"][metrics_df["episode"] % 30 == 0]
+    # Determine tick positions every 100 episodes
+    xticks = metrics_df["episode"][metrics_df["episode"] % 100 == 0]
 
     # Plot 1: Total Reward
     plt.figure()
