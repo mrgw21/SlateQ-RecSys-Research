@@ -7,7 +7,9 @@ from tf_agents.trajectories import policy_step, trajectory as trajectory_lib
 from tf_agents.policies import tf_policy
 
 
+# ----------------------------
 # Vanilla per-item Q network
+# ----------------------------
 class VanillaSlateQNetwork(network.Network):
     def __init__(self,
                  input_tensor_spec,
@@ -19,13 +21,15 @@ class VanillaSlateQNetwork(network.Network):
         self._num_items = int(num_items)
         reg = tf.keras.regularizers.l2(l2) if l2 and l2 > 0 else None
 
-        self._mlp = tf.keras.Sequential([
-            tf.keras.layers.Dense(h, activation='relu',
-                                  kernel_initializer=tf.keras.initializers.VarianceScaling(2.0),
-                                  kernel_regularizer=reg)
-            for h in hidden
-        ])
-        self._head = tf.keras.layers.Dense(self._num_items, activation=None, kernel_regularizer=reg)
+        layers = []
+        for h in hidden:
+            layers.append(tf.keras.layers.Dense(
+                h, activation='relu',
+                kernel_initializer=tf.keras.initializers.VarianceScaling(2.0),
+                kernel_regularizer=reg
+            ))
+        self._mlp = tf.keras.Sequential(layers, name=f"{name}_mlp")
+        self._head = tf.keras.layers.Dense(self._num_items, activation=None, kernel_regularizer=reg, name=f"{name}_head")
 
     def call(self, inputs, step_type=(), network_state=(), training=False):
         x = tf.convert_to_tensor(inputs['interest'])
@@ -34,7 +38,9 @@ class VanillaSlateQNetwork(network.Network):
         return q_values, network_state
 
 
+# ----------------------------
 # Greedy top-k policy (rank by v * Q)
+# ----------------------------
 class SlateQPolicy(tf_policy.TFPolicy):
     def __init__(self, time_step_spec, action_spec, q_network, slate_size: int, beta: float = 5.0):
         super().__init__(time_step_spec, action_spec)
@@ -56,6 +62,7 @@ class SlateQPolicy(tf_policy.TFPolicy):
             lambda: item_feats
         )
 
+        # Affinity v(s,i) = <user, item>
         v_all = tf.einsum("bd,bnd->bn", interest, item_feats)
 
         score = v_all * q_values
@@ -68,7 +75,9 @@ class SlateQPolicy(tf_policy.TFPolicy):
         return policy_step.PolicyStep(action=action, state=policy_state)
 
 
+# ----------------------------
 # Epsilon-greedy exploration
+# ----------------------------
 class SlateQExplorationPolicy(tf_policy.TFPolicy):
     def __init__(self,
                  base_policy: SlateQPolicy,
@@ -112,34 +121,57 @@ class SlateQExplorationPolicy(tf_policy.TFPolicy):
         return float(self._epsilon.numpy())
 
 
-# -----------
-# Vanilla Agent
-# -----------
+# ----------------------------
+# Vanilla SlateQ Agent
+# ----------------------------
 class SlateQAgent(tf_agent.TFAgent):
     """
-    Vanilla SlateQ:
-      - Q-network produces Q(s, i) for all items.
-      - Only updates the clicked item.
-      - Expected next-slate target using softmax over target Q(s', j) on the greedy next slate.
-      - Hard target update every target_update_period steps.
+    Vanilla SlateQ with stabilizers:
+      - Mask no-click transitions.
+      - Expected next-slate target aligns with position-biased cascade via pos_weights.
+      - Soft target update (tau) or hard periodical copy.
+      - Huber loss + gradient clipping.
+      - Reward scaling at training time.
     """
     def __init__(self, time_step_spec, action_spec,
                  num_users=10, num_topics=10, slate_size=5, num_items=100,
                  learning_rate=1e-3,
                  epsilon=0.2, min_epsilon=0.05, epsilon_decay_steps=20_000,
                  target_update_period=1000,
+                 tau=0.005,
                  gamma=0.95,
                  beta=5.0,
                  huber_delta=1.0,
-                 l2=0.0):
-
+                 grad_clip_norm=10.0,
+                 reward_scale=10.0,
+                 l2=0.0,
+                 pos_weights=None):
         self._train_step_counter = tf.Variable(0)
         self._num_items = int(num_items)
         self._slate_size = int(slate_size)
         self._target_update_period = int(target_update_period)
+        self._tau = float(tau)
         self._gamma = tf.constant(gamma, dtype=tf.float32)
         self._beta = tf.constant(beta, dtype=tf.float32)
+        self._grad_clip_norm = float(grad_clip_norm)
+        self._reward_scale = float(reward_scale)
         self.is_learning = True
+
+        # Prepare position weights (match env defaults if not provided)
+        if pos_weights is None:
+            pw = tf.linspace(1.0, 0.3, self._slate_size)
+        else:
+            pw = tf.convert_to_tensor(pos_weights, dtype=tf.float32)
+            # pad/truncate to slate_size
+            cur = tf.shape(pw)[0]
+            def pad():
+                pad_len = self._slate_size - cur
+                last = pw[-1]
+                return tf.concat([pw, tf.fill([pad_len], last)], axis=0)
+            def trunc():
+                return pw[:self._slate_size]
+            pw = tf.cond(cur < self._slate_size, pad, trunc)
+        self._pos_w = tf.reshape(pw, [1, self._slate_size])  # [1,K]
 
         input_tensor_spec = time_step_spec.observation['interest']
 
@@ -154,7 +186,7 @@ class SlateQAgent(tf_agent.TFAgent):
         self._target_q_network(dummy_obs, dummy_step, training=False)
         self._target_q_network.set_weights(self._q_network.get_weights())
 
-        # Optimizer
+        # Optimizer & loss
         self._optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
         self._huber = tf.keras.losses.Huber(delta=huber_delta, reduction=tf.keras.losses.Reduction.NONE)
 
@@ -224,76 +256,92 @@ class SlateQAgent(tf_agent.TFAgent):
 
             return tf.cond(tf.less(rank, tail_ndims), flatten_all, flatten_keep)
 
-        obs_t_interest    = slice_time(experience.observation['interest'], 0)
+        obs_t_interest    = slice_time(experience.observation['interest'], 0) 
         obs_tp1_interest  = slice_time(experience.observation['interest'], 1)
-        click_pos_t       = slice_time(experience.observation['choice'], 1)
+        click_pos_t       = slice_time(experience.observation['choice'], 1)   
 
         item_feats_tp1_any = slice_time(experience.observation['item_features'], 1)
         item_feats_rank = tf.rank(item_feats_tp1_any)
         item_feats_tp1 = tf.case([
-            (tf.equal(item_feats_rank, 4), lambda: item_feats_tp1_any[0, 0]),
-            (tf.equal(item_feats_rank, 3), lambda: item_feats_tp1_any[0]),
-        ], default=lambda: item_feats_tp1_any)
+            (tf.equal(item_feats_rank, 4), lambda: item_feats_tp1_any[0, 0]),  
+            (tf.equal(item_feats_rank, 3), lambda: item_feats_tp1_any[0]),    
+        ], default=lambda: item_feats_tp1_any)                                  
 
         act = experience.action
         act_rank = tf.rank(act)
         action_t = tf.cond(
             tf.greater_equal(act_rank, 2),
-            lambda: act[:, 0],
-            lambda: act
+            lambda: act[:, 0],  
+            lambda: act         
         )
 
-        reward_t      = slice_time(experience.reward, 1)
+        reward_t      = slice_time(experience.reward, 1)         
         discount_tp1  = tf.cast(slice_time(experience.discount, 1), tf.float32)
 
-        obs_t   = {'interest': flatten_keep_tail(obs_t_interest,   tail_ndims=1)}
+        # flatten batch and keep tail dims
+        obs_t   = {'interest': flatten_keep_tail(obs_t_interest,   tail_ndims=1)} 
         obs_tp1 = {'interest': flatten_keep_tail(obs_tp1_interest, tail_ndims=1)}
-        action_t     = flatten_keep_tail(action_t,     tail_ndims=1)
+        action_t     = flatten_keep_tail(action_t,     tail_ndims=1)               
         click_pos_t  = tf.cast(flatten_keep_tail(click_pos_t,  tail_ndims=0), tf.int32)
-        reward_t     = flatten_keep_tail(reward_t,     tail_ndims=0)
-        discount_tp1 = flatten_keep_tail(discount_tp1, tail_ndims=0)
+        reward_t     = flatten_keep_tail(reward_t,     tail_ndims=0)               
+        discount_tp1 = flatten_keep_tail(discount_tp1, tail_ndims=0)               
 
         batch_size = tf.shape(action_t)[0]
+        slate_size = tf.shape(action_t)[1]
 
-        idx = tf.stack([tf.range(batch_size), click_pos_t], axis=1)
+        clicked_mask = tf.less(click_pos_t, slate_size)
+        safe_click_pos = tf.minimum(click_pos_t, slate_size - 1)
+        idx = tf.stack([tf.range(batch_size), safe_click_pos], axis=1)
         clicked_item_id = tf.gather_nd(action_t, idx)
 
+        # forward & loss
         with tf.GradientTape() as tape:
             # Q(s_t, :)
             q_tm1_all, _ = self._q_network(obs_t, training=True)
             q_clicked = tf.gather(q_tm1_all, clicked_item_id, axis=1, batch_dims=1)
 
+            # Online net for argmax (Double Q)
             q_tp1_online_all, _ = self._q_network(obs_tp1, training=False)
 
+            # Greedy next slate indices by v * Q
             v_all = tf.linalg.matmul(obs_tp1['interest'], item_feats_tp1, transpose_b=True)
             score_next = v_all * q_tp1_online_all
             next_topk_idx = tf.math.top_k(score_next, k=self._slate_size).indices
 
-
+            # Target net values on greedy slate
             q_tp1_target_all, _ = self._target_q_network(obs_tp1, training=False)
             q_next_on_slate = tf.gather(q_tp1_target_all, next_topk_idx, axis=1, batch_dims=1)
 
-            v_all = tf.linalg.matmul(obs_tp1['interest'], item_feats_tp1, transpose_b=True)
+            # Position-biased soft choice model over next slate (align with env cascade)
             v_next_on_slate = tf.gather(v_all, next_topk_idx, axis=1, batch_dims=1)
             p_next = tf.nn.softmax(self._beta * v_next_on_slate, axis=-1)
-            expect_next = tf.reduce_sum(p_next * q_next_on_slate, axis=-1)
+            p_next = p_next * self._pos_w                                                    
+            p_next = p_next / tf.reduce_sum(p_next, axis=-1, keepdims=True)
+            expect_next = tf.reduce_sum(p_next * q_next_on_slate, axis=-1)                   
 
-            # TD target
-            y = tf.stop_gradient(reward_t + self._gamma * discount_tp1 * expect_next)
+            # TD target with (training-only) reward scaling
+            r_scaled = reward_t / self._reward_scale
+            y = tf.stop_gradient(r_scaled + self._gamma * discount_tp1 * expect_next)        
 
-            # Huber on clicked item only
-            per_example = tf.keras.losses.huber(y, q_clicked, delta=1.0)
-            loss = tf.reduce_mean(per_example)
+            # Huber loss on clicked item only
+            per_example = self._huber(y, q_clicked)                                          
+            per_example = per_example * tf.cast(clicked_mask, tf.float32)
+            denom = tf.reduce_sum(tf.cast(clicked_mask, tf.float32)) + 1e-6
+            loss = tf.reduce_sum(per_example) / denom
 
-        # Optimiser step
+        # Optimizer step with grad clipping
         grads = tape.gradient(loss, self._q_network.trainable_variables)
-        grads, _ = tf.clip_by_global_norm(grads, 5.0)
+        grads, _ = tf.clip_by_global_norm(grads, self._grad_clip_norm)
         self._optimizer.apply_gradients(zip(grads, self._q_network.trainable_variables))
         self._train_step_counter.assign_add(1)
 
-        # Hard target update
-        step = int(self._train_step_counter.numpy())
-        if step % self._target_update_period == 0:
-            self._target_q_network.set_weights(self._q_network.get_weights())
+        # Target updates: soft each step if tau>0, else hard every period
+        if self._tau > 0.0:
+            for w_t, w in zip(self._target_q_network.weights, self._q_network.weights):
+                w_t.assign(self._tau * w + (1.0 - self._tau) * w_t)
+        else:
+            step = int(self._train_step_counter.numpy())
+            if step % self._target_update_period == 0:
+                self._target_q_network.set_weights(self._q_network.get_weights())
 
         return tf_agent.LossInfo(loss=loss, extra={})

@@ -21,9 +21,8 @@ class TensorFieldSpec(value.FieldSpec):
 
 @gin.configurable
 def ecomm_story(num_users=10, num_items=100, slate_size=5):
-    # Models
     user_model = ECommUser(num_topics=10, num_users=num_users)
-    rec_model = ECommRecommender(num_topics=10, num_users=num_users, slate_size=slate_size)
+    rec_model  = ECommRecommender(num_topics=10, num_users=num_users, slate_size=slate_size)
     item_model = ECommItems(num_items=num_items, num_topics=10)
 
     action_spec = value.ValueSpec(
@@ -45,27 +44,30 @@ def ecomm_story(num_users=10, num_items=100, slate_size=5):
 
     user_var = variable.Variable(name="user_state", spec=user_model.specs())
     user_var.initial_value = value_def(fn=user_model.initial_state, dependencies=())
-    user_var.value = value_def(fn=lambda prev: prev, dependencies=(user_var.previous,))
 
     response_spec = value.ValueSpec(
-        reward=TensorFieldSpec(shape=(num_users,), dtype=tf.float32),
-        choice=TensorFieldSpec(shape=(num_users,), dtype=tf.int32),
+        reward        = TensorFieldSpec(shape=(num_users,), dtype=tf.float32),
+        choice        = TensorFieldSpec(shape=(num_users,), dtype=tf.int32),
+        continue_flag = TensorFieldSpec(shape=(num_users,), dtype=tf.int32),
     )
     response_var = variable.Variable(name="response", spec=response_spec)
     response_var.initial_value = value_def(
         fn=lambda: value.Value(
             reward=tf.zeros((num_users,), dtype=tf.float32),
             choice=tf.zeros((num_users,), dtype=tf.int32),
+            continue_flag=tf.ones((num_users,), dtype=tf.int32),
         ),
         dependencies=()
     )
+
+    # Response depends on previous user & item state + current action
     response_var.value = value_def(
-        fn=lambda user_state, action, item_state: user_model.response(
-            user_state,
+        fn=lambda user_state_prev, action, item_state_prev: user_model.response(
+            user_state_prev,
             value.Value(slate=action.get("act")),
-            item_state
+            item_state_prev
         ),
-        dependencies=(user_var, action_var, item_var.previous)
+        dependencies=(user_var.previous, action_var, item_var.previous)
     )
 
     rec_var = variable.Variable(name="rec_state", spec=rec_model.specs())
@@ -75,6 +77,17 @@ def ecomm_story(num_users=10, num_items=100, slate_size=5):
         dependencies=(rec_var.previous, action_var)
     )
 
+    user_var.value = value_def(
+        fn=lambda prev_user, action, item_state_prev, resp: user_model.next_state(
+            prev_user,
+            value.Value(slate=action.get("act")),
+            item_state_prev,
+            response=resp
+        ),
+        dependencies=(user_var.previous, action_var, item_var.previous, response_var)
+    )
+
+    # Return the assembled network
     return network.Network(
         variables=[action_var, item_var, user_var, response_var, rec_var]
     )
