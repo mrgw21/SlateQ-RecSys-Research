@@ -64,7 +64,10 @@ from src.core.registry import REGISTRY, register
 import src.agents.random_agent
 import src.agents.greedy_agent
 import src.agents.ctxbandit_agent
+from src.agents.dqn_agent import DQNAgent
 from src.agents.slateq_agent import SlateQAgent
+from src.agents.slateq_dueling_agent import SlateQDuelingAgent
+from src.agents.slateq_noisynet_agent import SlateQNoisyNetAgent
 
 from src.metrics.ranking_metrics import ndcg_at_k, slate_mrr
 from src.metrics.logger import MetricsLogger
@@ -72,7 +75,8 @@ from src.metrics.logger import MetricsLogger
 FLAGS = flags.FLAGS
 flags.DEFINE_multi_string('gin_files', [], 'Paths to config files.')
 flags.DEFINE_multi_string('gin_bindings', [], 'Gin parameter bindings.')
-flags.DEFINE_string('agent', 'slateq', 'Agent: random | greedy | ctxbandit | slateq')
+flags.DEFINE_string('agent', 'slateq',
+                    'Agent: random | greedy | ctxbandit | slateq | slateq_noisynet | dqn')
 
 flags.DEFINE_integer('episodes', 600, 'Number of episodes.')
 flags.DEFINE_integer('steps', 200, 'Steps per episode.')
@@ -105,6 +109,75 @@ def make_slateq(time_step_spec, action_spec, **kwargs):
         gamma=kwargs.get("gamma", 0.95),
         beta=kwargs.get("beta", 5.0),
     )
+
+# Registry wrapper for slateq with dueling
+@register("slateqdueling")
+def make_slateq_dueling(time_step_spec, action_spec, **kwargs):
+    return SlateQDuelingAgent(
+        time_step_spec=time_step_spec,
+        action_spec=action_spec,
+        num_users=kwargs.get("num_users"),
+        num_topics=kwargs.get("num_topics", 10),
+        slate_size=kwargs.get("slate_size"),
+        num_items=kwargs.get("num_items"),
+        learning_rate=kwargs.get("learning_rate", 1e-3),
+        epsilon=kwargs.get("epsilon", 0.2),
+        min_epsilon=kwargs.get("min_epsilon", 0.05),
+        epsilon_decay_steps=kwargs.get("epsilon_decay_steps", 20000),
+        target_update_period=kwargs.get("target_update_period", 1000),
+        gamma=kwargs.get("gamma", 0.95),
+        beta=kwargs.get("beta", 5.0),
+    )
+
+@register("slateq_noisynet")
+def make_slateq_noisynet(time_step_spec, action_spec, **kwargs):
+    return SlateQNoisyNetAgent(
+        time_step_spec=time_step_spec,
+        action_spec=action_spec,
+        num_users=kwargs.get("num_users"),
+        num_topics=kwargs.get("num_topics", 10),
+        slate_size=kwargs.get("slate_size"),
+        num_items=kwargs.get("num_items"),
+        learning_rate=kwargs.get("learning_rate", 1e-3),
+        epsilon=kwargs.get("epsilon", 0.1),
+        min_epsilon=kwargs.get("min_epsilon", 0.05),
+        epsilon_decay_steps=kwargs.get("epsilon_decay_steps", int(0.6 * kwargs.get("episodes", 600) * kwargs.get("steps", 200))),
+        target_update_period=kwargs.get("target_update_period", 1000),
+        tau=kwargs.get("tau", 0.005),
+        gamma=kwargs.get("gamma", 0.95),
+        beta=kwargs.get("beta", 5.0),
+        huber_delta=kwargs.get("huber_delta", 1.0),
+        grad_clip_norm=kwargs.get("grad_clip_norm", 10.0),
+        reward_scale=kwargs.get("reward_scale", 10.0),
+        l2=kwargs.get("l2", 0.0),
+        pos_weights=kwargs.get("pos_weights", None),
+        # Noisy layers
+        noisy_std_init=kwargs.get("noisy_std_init", 0.5),
+        reset_noise_every=kwargs.get("reset_noise_every", 1),
+    )
+
+@register("dqn")
+def make_dqn(time_step_spec, action_spec, **kwargs):
+    return DQNAgent(
+        time_step_spec=time_step_spec,
+        action_spec=action_spec,
+        num_users=kwargs.get("num_users"),
+        num_topics=kwargs.get("num_topics", 10),
+        slate_size=kwargs.get("slate_size"),
+        num_items=kwargs.get("num_items"),
+        learning_rate=kwargs.get("learning_rate", 1e-3),
+        epsilon=kwargs.get("epsilon", 0.2),
+        min_epsilon=kwargs.get("min_epsilon", 0.05),
+        epsilon_decay_steps=kwargs.get("epsilon_decay_steps", int(0.6 * kwargs.get("episodes", 600) * kwargs.get("steps", 200))),
+        target_update_period=kwargs.get("target_update_period", 1000),
+        tau=kwargs.get("tau", 0.005),
+        gamma=kwargs.get("gamma", 0.95),
+        huber_delta=kwargs.get("huber_delta", 1.0),
+        grad_clip_norm=kwargs.get("grad_clip_norm", 10.0),
+        reward_scale=kwargs.get("reward_scale", 10.0),
+        l2=kwargs.get("l2", 0.0),
+    )
+
 
 def _make_agent_timestep_spec(num_items, num_topics):
     return ts.TimeStep(
