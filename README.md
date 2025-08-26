@@ -1,8 +1,9 @@
 # SlateQ-RecSys-Research
 
-This repository contains my dissertation project at the University of Bath for the MSc Computer Science degree. It implements and evaluates slate-based reinforcement learning algorithms in a recommender system simulation environment, built on [**RecSim NG**](https://github.com/google-research/recsim_ng) (Google’s next-generation simulator for recommender system research) [Mladenov et al., 2021](https://arxiv.org/abs/2103.08057).
+This repository contains my dissertation project at the University of Bath for the MSc Computer Science degree. It implements and evaluates slate-based reinforcement learning algorithms in a recommender system simulation environment, built on [**RecSim NG**](https://github.com/google-research/recsim_ng) (Google’s next-generation simulator for recommender system research) [[Mladenov et al., 2021]](https://arxiv.org/abs/2103.08057).
 
-The project investigates the [**SlateQ algorithm**](https://www.ijcai.org/proceedings/2019/0360.pdf) and its variants, comparing them against simpler baselines such as random, greedy, and contextual bandit approaches. The primary focus is on studying long-term user dynamics, ranking quality, and the ability of learning agents to outperform short-sighted heuristics.
+The project investigates the [**SlateQ algorithm**](https://www.ijcai.org/proceedings/2019/0360.pdf) [[Ie et al., 2019]](https://www.ijcai.org/proceedings/2019/0360.pdf) and its variants, comparing them against simpler baselines such as random, greedy, and contextual bandit approaches. The primary focus is on analysing long-term user dynamics, evaluating ranking quality, and assessing the ability of learning agents to outperform short-sighted heuristics.
+
 
 ---
 
