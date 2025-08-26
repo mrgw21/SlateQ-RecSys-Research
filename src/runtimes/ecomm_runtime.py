@@ -15,15 +15,12 @@ class ECommRuntime(runtime.TFRuntime):
         rec_state  = self._current_state.get("rec_state", {})
 
         interest   = user_state.get("interest")
-        choice     = user_state.get("choice")
         item_feats = item_state.get("features")
         slate0     = rec_state.get("slate")
 
-        # Users / topics
         self._num_users    = int(interest.shape[0]) if interest is not None else 10
         self._interest_dim = int(interest.shape[1]) if (interest is not None and len(interest.shape) > 1) else 10
 
-        # Items / topics
         if item_feats is not None and len(item_feats.shape) >= 2:
             self._num_items  = int(item_feats.shape[0])
             self._num_topics = int(item_feats.shape[1])
@@ -31,14 +28,11 @@ class ECommRuntime(runtime.TFRuntime):
             self._num_items  = 100
             self._num_topics = self._interest_dim
 
-        # Slate size (try to infer from rec_state['slate'])
         if slate0 is not None and len(slate0.shape) >= 2:
             self._slate_size = int(slate0.shape[1])
         else:
-            # fallback to common default; your main.py also knows this number
             self._slate_size = 5
 
-        # Cached range for convenience
         self._user_range = tf.range(self._num_users, dtype=tf.int32)
 
         self._action_spec = tensor_spec.BoundedTensorSpec(
@@ -107,13 +101,18 @@ class ECommRuntime(runtime.TFRuntime):
             cond, body, [0, packed_state], shape_invariants=shape_invariants
         )
         return self._unpack(final_state)
-    
+
     def _to_first_time_step(self, state_value):
-        interest   = state_value.get("user_state").get("interest")
-        item_feats = state_value.get("item_state").get("features")
+        user_state = state_value.get("user_state")
+        item_state = state_value.get("item_state")
+
+        interest   = user_state.get("interest")
+        item_feats = item_state.get("features")
         num_users  = tf.shape(interest)[0]
+
+        item_feats_batched = tf.tile(item_feats[None, ...], [num_users, 1, 1])
         choice0 = tf.zeros([num_users], dtype=tf.int32)
-        item_feats_b = tf.tile(tf.expand_dims(item_feats, axis=0), [num_users, 1, 1])
+
         return ts.TimeStep(
             step_type=tf.fill([num_users], ts.StepType.FIRST),
             reward=tf.zeros([num_users], tf.float32),
@@ -121,7 +120,7 @@ class ECommRuntime(runtime.TFRuntime):
             observation={
                 "interest":      interest,
                 "choice":        choice0,
-                "item_features": item_feats_b,
+                "item_features": item_feats_batched,
             },
         )
 
@@ -136,13 +135,15 @@ class ECommRuntime(runtime.TFRuntime):
         cont_flag  = response.get("continue_flag")
         item_feats = item_state.get("features")
 
-        num_users  = tf.shape(interest)[0]
-        item_feats_b = tf.tile(tf.expand_dims(item_feats, axis=0), [num_users, 1, 1])
+        num_users = tf.shape(interest)[0]
+        item_feats_batched = tf.tile(item_feats[None, ...], [num_users, 1, 1])
 
         is_last   = tf.equal(cont_flag, 0)
-        step_type = tf.where(is_last,
-                             tf.fill(tf.shape(cont_flag), ts.StepType.LAST),
-                             tf.fill(tf.shape(cont_flag), ts.StepType.MID))
+        step_type = tf.where(
+            is_last,
+            tf.fill(tf.shape(cont_flag), ts.StepType.LAST),
+            tf.fill(tf.shape(cont_flag), ts.StepType.MID)
+        )
         discount = tf.where(is_last, tf.zeros_like(reward), tf.ones_like(reward))
 
         return ts.TimeStep(
@@ -152,10 +153,10 @@ class ECommRuntime(runtime.TFRuntime):
             observation={
                 "interest":      interest,
                 "choice":        choice,
-                "item_features": item_feats_b,
+                "item_features": item_feats_batched,
             },
         )
 
     def alive_mask(self):
-        cont_flag = self._current_state.get("response").get("continue_flag")  # [U]
+        cont_flag = self._current_state.get("response").get("continue_flag")
         return tf.equal(cont_flag, 1)

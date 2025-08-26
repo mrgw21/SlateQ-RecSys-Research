@@ -100,13 +100,6 @@ class _EpsGreedyPolicy(tf_policy.TFPolicy):
 
 # Agent
 class CtxBanditAgent(tf_agent.TFAgent):
-    """
-    Contextual bandit (supervised) learner:
-      - Model: linear on (interest ⊙ item_features[i])
-      - Loss: Huber/MSE on clicked item's immediate reward (+ L2 on w)
-      - Policy: ε-greedy top-K using model predictions
-      - IMPORTANT: masks no-clicks (env emits sentinel choice==K)
-    """
     def __init__(self, time_step_spec, action_spec,
                  num_users=10, num_topics=10, slate_size=5, num_items=100,
                  learning_rate=2e-3, l2=1e-6,
