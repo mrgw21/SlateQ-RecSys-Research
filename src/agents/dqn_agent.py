@@ -7,8 +7,8 @@ from tf_agents.trajectories import policy_step, trajectory as trajectory_lib
 from tf_agents.policies import tf_policy
 
 
+# Per item Q value network
 class DQNNetwork(network.Network):
-    """Standard feed-forward Q-network mapping interest features to per-item Q-values."""
     def __init__(self,
                  input_tensor_spec,
                  num_items: int,
@@ -46,8 +46,8 @@ class DQNNetwork(network.Network):
         return q_values, network_state
 
 
+# Greedy policy selecting actions from Q values
 class DQNGreedyPolicy(tf_policy.TFPolicy):
-    """Greedy policy over per-item Q-values; supports both scalar and slate actions."""
     def __init__(self, time_step_spec, action_spec, q_network):
         super().__init__(time_step_spec, action_spec)
         self._q_network = q_network
@@ -59,8 +59,16 @@ class DQNGreedyPolicy(tf_policy.TFPolicy):
         q_values, _ = self._q_network(obs, time_step.step_type)
 
         if self._is_slate:
-            topk = tf.math.top_k(q_values, k=self._slate_size)
-            loc = topk.indices
+            interest = tf.convert_to_tensor(obs["interest"])
+            item_feats = tf.convert_to_tensor(obs["item_features"])
+            item_feats = tf.cond(
+                tf.equal(tf.rank(item_feats), 2),
+                lambda: tf.tile(item_feats[None, ...], [tf.shape(interest)[0], 1, 1]),
+                lambda: item_feats
+            )
+            v_all = tf.einsum("bt,bnt->bn", interest, item_feats)
+            score = v_all * q_values
+            loc = tf.math.top_k(score, k=self._slate_size).indices
         else:
             loc = tf.argmax(q_values, axis=-1, output_type=tf.int32)
 
@@ -71,8 +79,8 @@ class DQNGreedyPolicy(tf_policy.TFPolicy):
         return policy_step.PolicyStep(action=action, state=policy_state)
 
 
+# Epsilon greedy exploration wrapper
 class DQNExplorationPolicy(tf_policy.TFPolicy):
-    """Epsilon-greedy wrapper around a greedy Q-policy, with exponential decay."""
     def __init__(self,
                  base_policy: DQNGreedyPolicy,
                  num_items: int,
@@ -116,11 +124,8 @@ class DQNExplorationPolicy(tf_policy.TFPolicy):
         return float(self._epsilon.numpy())
 
 
+# DQN agent with double DQN targets
 class DQNAgent(tf_agent.TFAgent):
-    """
-    Vanilla DQN agent over items.  
-    Supports both scalar and slate actions.
-    """
     def __init__(self, time_step_spec, action_spec,
                  num_users=10, num_topics=10, num_items=100,
                  learning_rate=1e-3,
@@ -174,6 +179,7 @@ class DQNAgent(tf_agent.TFAgent):
             train_step_counter=self._train_step_counter
         )
 
+    # Replay buffer trajectory type
     @property
     def collect_data_spec(self):
         return trajectory_lib.Trajectory(
@@ -186,9 +192,11 @@ class DQNAgent(tf_agent.TFAgent):
             discount=self._time_step_spec.discount,
         )
 
+    # No additional initialization
     def _initialize(self):
         return tf.no_op()
 
+    # One training step
     def _train(self, experience, weights=None):
         def slice_time(x, t_idx: int):
             return x[:, t_idx]
@@ -210,33 +218,26 @@ class DQNAgent(tf_agent.TFAgent):
 
             return tf.cond(tf.less(rank, tail_ndims), flatten_all, flatten_keep)
 
-        obs_t_interest    = slice_time(experience.observation['interest'], 0)
-        obs_tp1_interest  = slice_time(experience.observation['interest'], 1)
-        click_pos_t       = slice_time(experience.observation['choice'], 1)
+        obs_t_interest = slice_time(experience.observation['interest'], 0)
+        obs_tp1_interest = slice_time(experience.observation['interest'], 1)
+        click_pos_t = slice_time(experience.observation['choice'], 1)
 
-        item_feats_tp1_any = slice_time(experience.observation['item_features'], 1)
-        item_feats_rank = tf.rank(item_feats_tp1_any)
-        _ = tf.case([
-            (tf.equal(item_feats_rank, 4), lambda: item_feats_tp1_any[0, 0]),
-            (tf.equal(item_feats_rank, 3), lambda: item_feats_tp1_any[0]),
-        ], default=lambda: item_feats_tp1_any)
-
-        act = experience.action
-        act_rank = tf.rank(act)
+        act_t = slice_time(experience.action, 0)
+        act_t_rank = tf.rank(act_t)
         action_t = tf.cond(
-            tf.equal(act_rank, 2),
-            lambda: act,
-            lambda: tf.expand_dims(act, -1)
+            tf.equal(act_t_rank, 1),
+            lambda: tf.expand_dims(act_t, -1),
+            lambda: act_t
         )
 
-        reward_t      = slice_time(experience.reward, 1)
-        discount_tp1  = tf.cast(slice_time(experience.discount, 1), tf.float32)
+        reward_t = slice_time(experience.reward, 1)
+        discount_tp1 = tf.cast(slice_time(experience.discount, 1), tf.float32)
 
-        obs_t   = {'interest': flatten_keep_tail(obs_t_interest,   tail_ndims=1)}
+        obs_t = {'interest': flatten_keep_tail(obs_t_interest, tail_ndims=1)}
         obs_tp1 = {'interest': flatten_keep_tail(obs_tp1_interest, tail_ndims=1)}
-        action_t     = flatten_keep_tail(action_t,     tail_ndims=1)
-        click_pos_t  = tf.cast(flatten_keep_tail(click_pos_t,  tail_ndims=0), tf.int32)
-        reward_t     = flatten_keep_tail(reward_t,     tail_ndims=0)
+        action_t = flatten_keep_tail(action_t, tail_ndims=1)
+        click_pos_t = tf.cast(flatten_keep_tail(click_pos_t, tail_ndims=0), tf.int32)
+        reward_t = flatten_keep_tail(reward_t, tail_ndims=0)
         discount_tp1 = flatten_keep_tail(discount_tp1, tail_ndims=0)
 
         batch_size = tf.shape(action_t)[0]
@@ -244,15 +245,18 @@ class DQNAgent(tf_agent.TFAgent):
 
         clicked_mask = tf.less(click_pos_t, slate_size)
         safe_click_pos = tf.minimum(click_pos_t, slate_size - 1)
-        idx = tf.stack([tf.range(batch_size), safe_click_pos], axis=1)
-        clicked_item_id = tf.gather_nd(action_t, idx)
+
+        row_idx = tf.range(batch_size, dtype=tf.int32)
+        clicked_item_id = tf.gather_nd(action_t, tf.stack([row_idx, safe_click_pos], axis=1))
 
         with tf.GradientTape() as tape:
             q_tm1_all, _ = self._q_net(obs_t, training=True)
-            q_clicked = tf.gather(q_tm1_all, clicked_item_id, axis=1, batch_dims=1)
+            q_clicked = tf.gather_nd(q_tm1_all, tf.stack([row_idx, clicked_item_id], axis=1))
 
-            q_tp1_all, _ = self._tgt_net(obs_tp1, training=False)
-            q_next_max = tf.reduce_max(q_tp1_all, axis=-1)
+            q_tp1_online, _ = self._q_net(obs_tp1, training=False)
+            a_next = tf.argmax(q_tp1_online, axis=-1, output_type=tf.int32)
+            q_tp1_tgt, _ = self._tgt_net(obs_tp1, training=False)
+            q_next_max = tf.gather_nd(q_tp1_tgt, tf.stack([row_idx, a_next], axis=1))
 
             r_scaled = reward_t / self._reward_scale
             y = tf.stop_gradient(r_scaled + self._gamma * discount_tp1 * q_next_max)

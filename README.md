@@ -43,12 +43,11 @@ SlateQ-RecSys-Research/                 # Project root
 │           ├── metrics.csv             # Metrics logged in CSV
 │           └── metrics.jsonl           # Metrics logged in JSON Lines
 └── plots/                              # Auto-generated training plots
-    └── <agent_name>/                   # Separate folder for each agent
-        └── run_YYYY_MM_DD_HH_MM/       # Run-specific plots
-            ├── reward.png              # Reward vs episodes
-            ├── loss.png                # Loss vs episodes
-            ├── ranking.png             # NDCG@K and MRR vs episodes
-            └── click_epsilon.png       # Click rate and epsilon vs episodes
+    └── <agent_name>/                                   # Separate folder for each agent
+        └── run_YYYY_MM_DD_HH_MM_reward.png             # Reward vs episodes
+        └── run_YYYY_MM_DD_HH_MM_loss.png               # Loss vs episodes
+        └── run_YYYY_MM_DD_HH_MM_ranking.png            # NDCG@K and MRR vs episodes
+        └── run_YYYY_MM_DD_HH_MM_click_epsilon.png      # Click rate and epsilon vs episodes
 ```
 
 ---
@@ -96,8 +95,8 @@ Available agent names:
 - `greedy`
 - `ctxbandit`
 - `slateq`
-- `slateq_dueling`
-- `slateq_noisynet`
+- `slateqdueling`
+- `slateqnoisynet`
 - `dqn`
 
 ---
@@ -122,6 +121,23 @@ Generated figures include:
 - `click_epsilon.png`: Click rate and exploration epsilon vs episodes
 
 The plots include mean lines and moving averages for smoother visualisation.
+
+---
+
+## Sample Training Plots
+
+Below is an example set of training plots, generated from a single run.
+
+<p align="center">
+  <img src="readme/sample_plots.png" alt="Sample Training Plots" width="800">
+</p>
+
+These plots illustrate:
+
+- **Top-left:** Total reward over episodes, with moving average and mean reference lines.
+- **Top-right:** Training loss over episodes.
+- **Bottom-left:** Click rate and exploration epsilon decay.
+- **Bottom-right:** Ranking metrics, showing NDCG@5 and Slate MRR.
 
 ---
 
